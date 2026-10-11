@@ -1,8 +1,14 @@
 name: Build Windows exe
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      commit_exe:
+        description: "Also commit Duckstoken.exe into the repository (main branch)"
+        type: boolean
+        default: true
 permissions:
   contents: write
 jobs:
@@ -23,7 +29,7 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process -FilePath dist\Duckstoken.exe -ArgumentList "--no-browser","--port","18999","--data-dir","$env:RUNNER_TEMP\duck" -PassThru
-          Start-Sleep -Seconds 8
+          Start-Sleep -Seconds 10
           $html = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18999/).Content
           if ($html -notmatch "Duckstoken") { throw "UI did not load" }
           Stop-Process -Id $p.Id -Force
@@ -31,9 +37,29 @@ jobs:
         with:
           name: Duckstoken-windows
           path: dist/Duckstoken.exe
-      - name: Publish release
+      - name: Publish versioned release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/Duckstoken.exe
           generate_release_notes: true
+      - name: Publish rolling "latest" release
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --cleanup-tag --yes 2>$null
+          gh release create latest dist/Duckstoken.exe --prerelease --title "Latest build (main)" --notes "Automatic build of the main branch. Double-click Duckstoken.exe to run." --target $env:GITHUB_SHA
+          exit 0
+      - name: Commit Duckstoken.exe to main
+        if: github.event_name == 'workflow_dispatch' && inputs.commit_exe && github.ref == 'refs/heads/main'
+        shell: pwsh
+        run: |
+          Copy-Item dist\Duckstoken.exe Duckstoken.exe -Force
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Duckstoken.exe
+          git commit -m "Build Duckstoken.exe from $env:GITHUB_SHA"
+          git pull --rebase origin main
+          git push origin HEAD:main

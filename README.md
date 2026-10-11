@@ -19,7 +19,7 @@ starts the model server, and gives you a chat UI — with optional, heavily-guar
 
 ## Quick start (Windows 10/11)
 
-1. Download `Duckstoken.exe` from the [Releases](../../releases) page and run it. (SmartScreen may warn: it's an unsigned open-source app → *More info → Run anyway*.)
+1. Download [`Duckstoken.exe`](https://github.com/qitzblue2/Duckstoken/raw/main/Duckstoken.exe) (also on the [Releases](../../releases) page) and double-click it. (SmartScreen may warn: it's an unsigned open-source app → *More info → Run anyway*.)
 2. **Models → Engine → Find latest build → Install.**
 3. **Models → download** `gpt-oss-20b` (11 GB, fast) or `gpt-oss-120b` (59 GB, needs a fast SSD).
 4. **Dashboard → ⚡ Auto-tune → ▶ Start**, then open **Chat**.
