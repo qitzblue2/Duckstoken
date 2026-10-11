@@ -73,6 +73,16 @@ def connect_host(host: str) -> str:
     return "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
 
 
+def split_args(text: str) -> list[str]:
+    """Split a command-line string. Quotes group words but are removed; backslashes stay literal (Windows paths)."""
+    out = []
+    for tok in shlex.split(text, posix=False):
+        if len(tok) >= 2 and tok[0] == tok[-1] and tok[0] in "\"'":
+            tok = tok[1:-1]
+        out.append(tok)
+    return out
+
+
 def build_args(s: dict) -> list[str]:
     """Settings -> llama-server argv (without the executable)."""
     args: list[str] = []
@@ -93,7 +103,7 @@ def build_args(s: dict) -> list[str]:
         args += [flag, str(val)]
     extra = (s.get("extra_args") or "").strip()
     if extra:
-        args += shlex.split(extra, posix=(os.name != "nt"))
+        args += split_args(extra)
     return args
 
 
