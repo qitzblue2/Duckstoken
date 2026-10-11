@@ -64,6 +64,12 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(a[-2:], ["--foo", "a b"])
         self.assertIn("--jinja", a)
 
+    def test_split_args_keeps_windows_paths_and_strips_quotes(self):
+        from duckstoken.server_proc import split_args
+        self.assertEqual(split_args(r'--lora "C:\My Models\a.gguf" --x C:\y\z -n 3'),
+                         ["--lora", r"C:\My Models\a.gguf", "--x", r"C:\y\z", "-n", "3"])
+        self.assertEqual(split_args("--a 'b c'"), ["--a", "b c"])
+
 
 class GGUFTests(unittest.TestCase):
     def test_summary(self):
