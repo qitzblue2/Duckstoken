@@ -29,10 +29,10 @@ def convo(question="What is 2+2?", *earlier):
 
 class TempDbCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = Database(Path(self.tmp.name) / "x.db")
-        self.addCleanup(self.db.conn().close)  # Windows cannot delete a database that is still open
+        self.addCleanup(self.db.close)  # Windows cannot delete a database that is still open
         self.queue = QueueStore(self.db)
 
 
@@ -278,7 +278,7 @@ class InWindowTests(unittest.TestCase):
 # ---------------------------------------------------------------------------------------- server settings
 class BigSettingsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.dir = Path(self.tmp.name)
         self.base = {"llama_server_path": "/bin/llama-server", "model_path": "/models/small.gguf", "host": "0.0.0.0",
@@ -353,7 +353,8 @@ class HardPromptTests(unittest.TestCase):
     NEGATIVE = [
         "hi", "Hello there, how are you today?", "What's the capital of France?", "Write a haiku about autumn",
         "Translate 'good morning' to Spanish", "Write a Python function that reverses a string",
-        "Tell me a joke about ducks", "Summarize this paragraph for me please", "How do I prove my identity to the bank?",
+        "Tell me a joke about ducks", "Summarize this paragraph for me please",
+        "How do I prove my identity to the bank?",
         "Can you proofread my email to the landlord?", "What is a proof of concept in a startup?",
         "What's the optimal temperature for brewing green tea?", "What time is it in Tokyo right now?",
         "How do I improve my sleep?", "Give me three ideas for a birthday party for a ten year old",
@@ -402,7 +403,8 @@ class UnsureAnswerTests(unittest.TestCase):
     ]
     CONFIDENT = [
         "The capital of France is Paris.", "", None, "   ", "Sure! Here is the code:\n```python\nprint('hi')\n```",
-        "You don't know what you are missing, this recipe is great.", "Sorry for the confusion earlier, the answer is 42.",
+        "You don't know what you are missing, this recipe is great.",
+        "Sorry for the confusion earlier, the answer is 42.",
         "I can't wait to show you how this works! " + "Here is the full explanation of the approach. " * 5,
         "A long, careful answer that explains every step of the method in detail. " * 60 +
         "In the middle there is a quote: 'I don't know' said the character. " + "More explanation here. " * 60,
@@ -1072,7 +1074,8 @@ class ThreadTests(WorkerCase):
         job = self.job(exchange_id=1)
         self.worker.wake()
         self.assertTrue(self.wait_for(lambda: self.queue.get(job["id"])["status"] == "done"))
-        self.assertTrue(self.wait_for(lambda: self.small.state != "stopped" and self.worker.status()["phase"] == "idle"))
+        self.assertTrue(self.wait_for(lambda: self.small.state != "stopped"
+                                      and self.worker.status()["phase"] == "idle"))
         self.worker.stop()
         self.assertEqual(self.exchanges.teachers[1][0], "The big answer.")
 

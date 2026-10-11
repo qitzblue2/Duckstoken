@@ -284,7 +284,7 @@ class ServerLifecycleTests(unittest.TestCase):
         a = appmod.APP
         a.settings.reset()
         a.settings.update({"llama_server_path": str(ROOT / "tests" / "fake_llama_server.py"),
-                           "model_path": str(self._model()), "port": 18999, "stop_server_on_exit": True})
+                           "model_path": str(self._model()), "port": self._free_port(), "stop_server_on_exit": True})
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), appmod.Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -311,6 +311,13 @@ class ServerLifecycleTests(unittest.TestCase):
             a.server.stop()
             httpd.shutdown()
         self.assertFalse(a.server.status()["running"])
+
+    @staticmethod
+    def _free_port():
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
 
     def _model(self):
         p = Path(_HOME) / "m.gguf"
