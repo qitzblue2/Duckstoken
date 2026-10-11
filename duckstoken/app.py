@@ -564,34 +564,58 @@ def _free_port(preferred: int) -> int:
     raise RuntimeError("No free port found")
 
 
-def run(open_browser: bool | None = None, port: int | None = None) -> None:
-    for sink in ("stdout", "stderr"):  # windowed builds have no console
+def _make_shell(url: str, minimized: bool):
+    """The native window + tray, or None when its optional pieces are unavailable."""
+    try:
+        from .shell import Shell
+    except Exception:  # noqa: BLE001 - missing optional dependencies must never stop the app
+        return None
+    icon = bundle.resource_root() / "duckstoken" / "web" / "icon.png"
+    get = (lambda: {**APP.settings.all(), "start_minimized": True}) if minimized else APP.settings.all
+    return Shell(url, get, on_quit=APP.shutdown, icon_path=str(icon) if icon.is_file() else None)
+
+
+def _redirect_stdio() -> None:
+    """Windowed builds have no console: send output to a log file so problems can still be diagnosed."""
+    for sink in ("stdout", "stderr"):
         if getattr(sys, sink) is None:
-            setattr(sys, sink, open(os.devnull, "w"))
+            try:
+                setattr(sys, sink, open(paths.data_dir() / "duckstoken.log", "a", encoding="utf-8", buffering=1))
+            except OSError:
+                setattr(sys, sink, open(os.devnull, "w"))
+
+
+def run(open_browser: bool | None = None, port: int | None = None, headless: bool = False,
+        minimized: bool = False) -> None:
+    _redirect_stdio()
     APP.port = _free_port(port or 8765)
     ThreadingHTTPServer.daemon_threads = True
     APP.httpd = ThreadingHTTPServer(("127.0.0.1", APP.port), Handler)
     url = f"http://127.0.0.1:{APP.port}/"
-    print(f"Duckstoken {__version__} is running at {url}\nClose this window (or press Ctrl+C) to quit.")
+    print(f"Duckstoken {__version__} is running at {url}", flush=True)
+    serving = threading.Thread(target=APP.httpd.serve_forever, daemon=True, name="http")
+    serving.start()
     threading.Thread(target=hardware.get_hardware, daemon=True).start()  # warm the slow probes
     APP.worker.start()
     if APP.settings.get("autostart_server"):
         try:
             APP.server.start(APP.settings.all())
         except RuntimeError as e:
-            print("Auto-start skipped:", e)
-    if open_browser if open_browser is not None else APP.settings.get("open_browser"):
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+            print("Auto-start skipped:", e, flush=True)
     for name in ("SIGTERM", "SIGBREAK"):  # make `kill` / Ctrl+Break shut the model server down too
         if hasattr(signal, name):
             signal.signal(getattr(signal, name), lambda *_: APP.shutdown())
     try:
-        APP.httpd.serve_forever()
+        shell = None if headless or open_browser is False else _make_shell(url, minimized)
+        if shell is not None:
+            shell.run()  # blocks until the user quits from the window or the tray
+        else:
+            if not headless and (open_browser if open_browser is not None else APP.settings.get("open_browser")):
+                threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+            while serving.is_alive():
+                serving.join(0.5)
     except KeyboardInterrupt:
         pass
     finally:
-        APP.worker.stop()
-        if APP.settings.get("stop_server_on_exit"):
-            APP.server.stop()
-            APP.big.stop()
+        APP.shutdown()
         APP.httpd.server_close()
