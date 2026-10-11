@@ -71,7 +71,9 @@ class _TextExtractor(HTMLParser):
         self.title = ""
         self._skip_tags = skip
         self._title_parts: list[str] = []
-        self._parts: list[str] = []
+        self._parts: list[str] = [""]
+        self._newlines = 2  # newlines at the end of the output so far; 2 = start of the document
+        self._prefix = ""  # list bullet or table-cell separator, written only if text follows
         self._skipping: dict[str, int] = {}
         self._skip_depth = 0
         self._article_depth = 0
@@ -85,13 +87,22 @@ class _TextExtractor(HTMLParser):
     def _emit(self, text: str) -> None:
         if not self._pre_depth:
             text = _WS.sub(" ", text)
-            if not self._parts or self._parts[-1].endswith(("\n", " ")):
+            if self._prefix or self._newlines or self._parts[-1].endswith(" "):
                 text = text.lstrip(" ")
-        if text:
-            self._parts.append(text)
+        if not text or (self._prefix and not text.strip()):
+            return
+        self._parts.append(self._prefix + text)
+        self._prefix = ""
+        trailing = len(text) - len(text.rstrip("\n"))
+        self._newlines = self._newlines + trailing if not text.strip("\n") else trailing
 
     def _break(self, tag: str) -> None:
-        self._parts.append("\n\n" if tag in _PARAGRAPH_TAGS else "\n")
+        """Start a new line (or a blank line between paragraphs) unless the output already ends that way."""
+        self._prefix = ""
+        missing = (2 if tag in _PARAGRAPH_TAGS else 1) - self._newlines
+        if missing > 0:
+            self._parts.append("\n" * missing)
+            self._newlines += missing
 
     def handle_starttag(self, tag: str, attrs: list) -> None:
         if tag in self._skip_tags and not (tag == "header" and self._article_depth):  # an article's own headline
@@ -102,16 +113,16 @@ class _TextExtractor(HTMLParser):
             return
         if tag == "title" and not self.title:
             self._in_title = True
-        elif tag in ("article", "main"):
+        elif tag == "article":
             self._article_depth += 1
         elif tag == "pre":
             self._pre_depth += 1
         if tag in _BREAK_TAGS:
             self._break(tag)
         if tag == "li":
-            self._parts.append("- ")
-        elif tag in ("td", "th") and self._parts and not self._parts[-1].endswith("\n"):
-            self._parts.append(" | ")
+            self._prefix = "- "
+        elif tag in ("td", "th") and not self._newlines:
+            self._prefix = " | "
 
     def handle_endtag(self, tag: str) -> None:
         if self._skipping.get(tag):
@@ -123,7 +134,7 @@ class _TextExtractor(HTMLParser):
         if tag == "title":
             self._in_title = False
             self.title = _WS.sub(" ", "".join(self._title_parts)).strip()[:300]
-        elif tag in ("article", "main") and self._article_depth:
+        elif tag == "article" and self._article_depth:
             self._article_depth -= 1
         elif tag == "pre" and self._pre_depth:
             self._pre_depth -= 1
@@ -620,15 +631,17 @@ _CODE_OR_TASK = re.compile(
     r"|\b(rewrite|rephrase|paraphrase|translate|summari[sz]e|proofread|reword|shorten|tl;?dr)\b"
     r".*(\b(this|these|following|below|above|text|paragraph|email|sentence|essay|passage)\b|[:\"'\n])"
     r"|\bfix (the |my )?(grammar|spelling)", re.I | re.S)
-_MATH = re.compile(r"\d\s*[+*^×÷]\s*\d|\d\s+[-x/]\s+\d|\d\s*%\s*of\s*\d|\b(square root|sqrt|derivative|integral|"
+_MATH = re.compile(r"\d\s*[+*^×÷]\s*\d|\d\s+([-x/]|plus|minus|times|divided by|multiplied by)\s+\d|\d\s*%\s*of\s*\d|"
+                   r"\b(square root|sqrt|derivative|integral|"
                    r"factorial|solve for|equation|calculate|compute)\b", re.I)
 _PERSONAL = re.compile(r"\b(my|our|your) (latest|newest|most recent|current|recent)\b", re.I)
 _FRESH = re.compile(r"\b(latest|newest|most recent|recent (news|releases?|versions?|updates?|events?|developments?)|"
                     r"breaking|headlines?|news|trending|up[- ]to[- ]date|release (date|notes)|changelog|prices?|"
                     r"exchange rates?|weather|forecast|temperature in|scores?|standings|who won|net worth|"
-                    r"20(2[3-9]|[3-9]\d))\b", re.I)
+                    r"will it (rain|snow)|what time is it|20(2[3-9]|[3-9]\d))\b", re.I)
 _TIME = re.compile(r"\b(right now|tonight|today's|as of today|this (week|weekend|month)|last night|yesterday|"
-                   r"currently|current|just (released|announced|launched)|these days)\b", re.I)
+                   r"currently|current|just (released|announced|launched)|(out|released|available|launched) yet|"
+                   r"coming out|come out|these days)\b", re.I)
 _FACT_LOOKUP = re.compile(r"\b(who is|who's|who was|who are|what is the|what's the|when did|when does|when is|"
                           r"when was|where is|how much (is|does|do|are)|how many|versions?|releases?|released)\b", re.I)
 _ASKING = re.compile(r"^(who|what|when|where|which|how|is|are|does|did|has|have|will|can|could|do)\b|\?\s*$", re.I)

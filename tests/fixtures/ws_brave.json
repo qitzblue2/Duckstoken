@@ -1,0 +1,12 @@
+{
+  "type": "search",
+  "query": {"original": "duck"},
+  "web": {
+    "type": "search",
+    "results": [
+      {"title": "Duck | Britannica", "url": "https://www.britannica.com/animal/duck", "description": "<strong>Duck</strong>, any of various web-footed birds &amp; relatives.", "page_age": "2025-01-01T00:00:00"},
+      {"title": "Ducks Unlimited", "url": "https://www.ducks.org/", "description": "Wetlands conservation.", "extra_snippets": ["ignored"]},
+      {"title": "Broken entry", "url": "javascript:alert(1)", "description": "dropped"}
+    ]
+  }
+}
