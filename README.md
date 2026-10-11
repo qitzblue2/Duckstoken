@@ -5,8 +5,6 @@ Duckstoken is a one-file Windows app (no installer, no dependencies) that downlo
 [llama.cpp](https://github.com/ggml-org/llama.cpp) and your model, **tunes ~85 settings for your hardware**,
 starts the model server, and gives you a chat UI — with optional, heavily-guarded tools that let the AI work on your PC.
 
-![dashboard](docs/dashboard.png)
-
 ## What it does
 
 | | |
