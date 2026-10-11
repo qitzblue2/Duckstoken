@@ -426,12 +426,17 @@ def _squash(text, limit: int) -> str:
 
 
 def _strip_markup(text, limit: int) -> str:
-    return _squash(unescape(re.sub(r"<[^>]*>", " ", str(text or ""))), limit)
+    return _squash(unescape(re.sub(r"<[^>]*>", "", str(text or ""))), limit)
 
 
 def _result(title, url, snippet) -> dict | None:
+    """A cleaned search result, or None when `url` is not a usable http(s) link."""
     url = str(url or "").strip()
-    if len(url) > MAX_URL or _URL_FORBIDDEN.search(url) or urlsplit(url).scheme not in ("http", "https"):
+    try:
+        scheme = urlsplit(url).scheme
+    except ValueError:
+        return None
+    if len(url) > MAX_URL or _URL_FORBIDDEN.search(url) or scheme not in ("http", "https"):
         return None
     return {"title": title or url, "url": url, "snippet": snippet}
 
@@ -447,8 +452,11 @@ def _unique(results: list[dict | None]) -> list[dict]:
 
 def _unwrap_duckduckgo(href: str | None) -> str:
     """The real destination behind a DuckDuckGo redirect link; "" for ads and DuckDuckGo's own links."""
-    parts = urlsplit(urljoin("https://duckduckgo.com/", (href or "").strip()))
-    host = parts.hostname or ""
+    try:
+        parts = urlsplit(urljoin("https://duckduckgo.com/", (href or "").strip()))
+        host = parts.hostname or ""
+    except ValueError:
+        return ""
     if host != "duckduckgo.com" and not host.endswith(".duckduckgo.com"):
         return parts.geturl()
     target = parse_qs(parts.query).get("uddg") if parts.path.rstrip("/") == "/l" else None
