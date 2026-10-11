@@ -25,6 +25,7 @@ MAX_MESSAGES_BYTES = 2 * 1024 * 1024  # stored conversation; oldest messages are
 MAX_NOTE = 2000
 MAX_NAME = 200                        # chat id, model name, effort
 MAX_SOURCES = 20
+MAX_INT = 2**31                       # ids, indexes and offsets are clamped well inside SQLite's range
 MAX_LIMIT = 200                       # rows per list() page
 MAX_SCAN = 2000                       # candidates examined when looking for similar prompts
 MATCH_CHARS = 2000                    # only the start of a prompt is used for matching
@@ -163,11 +164,15 @@ def _item(row: dict, include_messages: bool) -> dict:
     return row
 
 
+def _clamp(value, low: int, high: int) -> int:
+    return max(low, min(int(value), high))
+
+
 def _as_id(value) -> int | None:
     if isinstance(value, bool):
         return None
     try:
-        return int(value)
+        return _clamp(value, -1, MAX_INT)  # -1 never matches a row
     except (TypeError, ValueError):
         return None
 
@@ -227,6 +232,22 @@ def _rank(query: str, texts: list[str]) -> list[tuple[float, int]]:
     return sorted(ranked, key=lambda r: -r[0])
 
 
+def _sep_len(section: str) -> int:
+    """Characters a non-empty section takes away from the room left for the other one (its length + blank line)."""
+    return len(section) + 2 if section else 0
+
+
+def _reminders(lessons: list[dict], limit: int) -> tuple[str, list[int]]:
+    text, ids = REMINDERS_HEAD, []
+    for lesson in lessons:
+        room = limit - len(text) - 1
+        if room < 20:
+            break
+        text += "\n" + _fit("- " + _lesson_text(lesson["prompt"], lesson["note"]), min(300, room))
+        ids.append(lesson["id"])
+    return (text, ids) if ids else ("", [])
+
+
 class ExchangeStore:
     def __init__(self, db: Database, memory: MemoryStore | None = None):
         self.db = db
@@ -239,7 +260,7 @@ class ExchangeStore:
         chat_id = _arg(chat_id, MAX_NAME + 1)
         if not chat_id or len(chat_id) > MAX_NAME:
             raise ValueError("chat_id must be 1-200 characters")
-        if isinstance(msg_index, bool) or not isinstance(msg_index, int) or msg_index < 0:
+        if isinstance(msg_index, bool) or not isinstance(msg_index, int) or not 0 <= msg_index < MAX_INT:
             raise ValueError("msg_index must be a non-negative integer")
         if not isinstance(messages, list):
             raise ValueError("messages must be a list")
@@ -301,10 +322,11 @@ class ExchangeStore:
         if rating is not None:
             where.append("rating = ?")
             params.append(_check_rating(rating))
-        if q and q.strip():
+        q = (q or "").replace("\x00", "").strip()[:200]
+        if q:
             where.append("(" + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in
                                           ("prompt", "answer", "correction", "note", "teacher_answer")) + ")")
-            params += [_like(q.strip()[:200])] * 5
+            params += [_like(q)] * 5
         for flag, column in ((with_teacher, "teacher_answer"), (corrected, "correction")):
             if flag is not None:
                 where.append(f"{column} {'!=' if flag else '='} ''")
@@ -312,7 +334,7 @@ class ExchangeStore:
         total = self.db.scalar(f"SELECT count(*) FROM exchanges{clause}", params)
         cols = _COLUMNS + (", messages_json" if include_messages else "")
         rows = self.db.query(f"SELECT {cols} FROM exchanges{clause} ORDER BY created DESC, id DESC LIMIT ? OFFSET ?",
-                             [*params, max(1, min(int(limit), MAX_LIMIT)), max(0, int(offset))])
+                             [*params, _clamp(limit, 1, MAX_LIMIT), _clamp(offset, 0, MAX_INT)])
         return {"items": [_item(r, include_messages) for r in rows], "total": total}
 
     def stats(self) -> dict:
@@ -323,11 +345,12 @@ class ExchangeStore:
 
     def recent_without_teacher(self, n, since=0.0) -> list[dict]:
         """Newest exchanges (any rating) that have a prompt but no big-model answer yet, with their messages."""
-        if n <= 0:
+        n = _clamp(n, 0, MAX_SCAN)
+        if n == 0:
             return []
         rows = self.db.query(f"""SELECT {_COLUMNS}, messages_json FROM exchanges
                                  WHERE prompt != '' AND teacher_answer = '' AND created >= ?
-                                 ORDER BY created DESC, id DESC LIMIT ?""", (since, int(n)))
+                                 ORDER BY created DESC, id DESC LIMIT ?""", (since, n))
         return [_item(r, True) for r in rows]
 
     # ------------------------------------------------------------------ learning from feedback
@@ -366,18 +389,20 @@ class ExchangeStore:
             key = (_squash(row["prompt"].casefold()), _squash(row["note"].casefold()))
             if key not in seen:
                 seen.add(key)
-                picked.append({"id": row["id"], "prompt": row["prompt"].strip(), "note": row["note"], "score": round(score, 3)})
+                picked.append({"id": row["id"], "prompt": row["prompt"].strip(), "note": row["note"],
+                               "score": round(score, 3)})
                 if len(picked) == k:
                     break
         return picked
 
     def build_block(self, query, k, max_chars, lessons=True) -> dict:
         """Prompt text with similar liked answers and past reminders, never longer than `max_chars`."""
-        reminders, lesson_ids = "", []
-        if lessons and max_chars > 0:
-            reminders, lesson_ids = self._reminders(query, max_chars // 3 if k > 0 else max_chars)
-        room = max_chars - (len(reminders) + 2 if reminders else 0)
-        examples, example_ids = self._examples_section(query, k, room)
+        found = self.lessons_for(query) if lessons and max_chars > 0 else []
+        reminders, lesson_ids = _reminders(found, max_chars // 3 if k > 0 else max_chars)
+        examples, example_ids = self._examples_section(query, k, max_chars - _sep_len(reminders))
+        spare = max_chars - _sep_len(examples)
+        if found and k > 0 and spare > max_chars // 3:  # the examples left room: let the reminders use it
+            reminders, lesson_ids = _reminders(found, spare)
         return {"text": "\n\n".join(t for t in (examples, reminders) if t),
                 "example_ids": example_ids, "lesson_ids": lesson_ids}
 
@@ -390,13 +415,3 @@ class ExchangeStore:
             return "", []
         blocks = [f"Q: {e['prompt']}\nA: {e['answer']}" for e in found]
         return "\n\n".join([EXAMPLES_HEAD, *blocks]), [e["id"] for e in found]
-
-    def _reminders(self, query, limit: int) -> tuple[str, list[int]]:
-        text, ids = REMINDERS_HEAD, []
-        for lesson in self.lessons_for(query):
-            room = limit - len(text) - 1
-            if room < 20:
-                break
-            text += "\n" + _fit("- " + _lesson_text(lesson["prompt"], lesson["note"]), min(300, room))
-            ids.append(lesson["id"])
-        return (text, ids) if ids else ("", [])
