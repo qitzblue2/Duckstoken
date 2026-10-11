@@ -42,7 +42,7 @@ class StoreCase(unittest.TestCase):
 
     def open_db(self, name):
         db = Database(Path(self.tmp.name) / name)
-        self.addCleanup(db.conn().close)  # Windows cannot delete a database that is still open
+        self.addCleanup(db.close)  # Windows cannot delete a database that is still open
         return db
 
     def add(self, prompt, answer="An answer.", chat="c1", **kw):

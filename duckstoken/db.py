@@ -108,11 +108,13 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.RLock()
+        self._connections: list[sqlite3.Connection] = []
         self.has_fts = False
         self._init()
 
     def _connect(self) -> sqlite3.Connection:
-        c = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)  # autocommit; we use explicit tx
+        c = sqlite3.connect(str(self.path), timeout=30, isolation_level=None,  # autocommit; explicit tx where needed
+                            check_same_thread=False)  # connections are per-thread, but close() may run elsewhere
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         c.execute("PRAGMA foreign_keys=ON")
@@ -122,7 +124,20 @@ class Database:
         c = getattr(self._local, "c", None)
         if c is None:
             c = self._local.c = self._connect()
+            with self._write_lock:
+                self._connections.append(c)
         return c
+
+    def close(self) -> None:
+        """Close every connection (all threads). Windows cannot delete a database file that is still open."""
+        with self._write_lock:
+            for c in self._connections:
+                try:
+                    c.close()
+                except sqlite3.Error:
+                    pass
+            self._connections.clear()
+            self._local = threading.local()
 
     def _init(self) -> None:
         c = self.conn()
