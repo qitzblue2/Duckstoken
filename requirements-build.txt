@@ -1,0 +1,5 @@
+pyinstaller>=6.6
+numpy>=1.26
+pillow>=10
+pywebview>=5
+pystray>=0.19

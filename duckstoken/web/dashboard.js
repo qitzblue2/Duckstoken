@@ -41,8 +41,9 @@ const Dashboard = {
       h('div', { class: 'grid' },
         h('div', {},
           h('div', { class: 'card' }, h('h2', {}, '🧠 Model server ', r.state),
-            h('div', { class: 'row' }, h('div', { class: 'grow' }, r.model),
+            r.modelRow = h('div', { class: 'row' }, h('div', { class: 'grow' }, r.model),
               h('button', { onclick: async () => { const p = await pickPath({ kind: 'file', ext: '.gguf', start: S.values.model_path || S.values.models_dir }); if (p) { await setSetting('model_path', p); this.loadModels(); } } }, 'Browse…')),
+            r.engineNote = h('div', { class: 'muted small', style: 'margin-top:6px' }),
             h('div', { class: 'row', style: 'margin:10px 0' }, r.start, r.stop, r.restart,
               h('button', { onclick: () => this.autotune() }, '⚡ Auto-tune for my PC'), r.info),
             r.err,
@@ -139,7 +140,7 @@ const Dashboard = {
   steps() {
     const v = S.values, ok = (b) => h('span', { class: 'badge ' + (b ? 'good' : 'unknown') }, b ? '✔' : '•');
     const rows = [
-      [!!v.llama_server_path, 'Install the engine (llama.cpp)', 'Models → Engine', 'models'],
+      [!!v.llama_server_path || !!S.engineInfo?.bundled || v.engine !== 'llamacpp', 'Choose an engine (llama.cpp is bundled)', 'Models → Engine', 'models'],
       [this.models.length > 0, 'Download a model (gpt-oss-120b or 20b)', 'Models → Hugging Face', 'models'],
       [!!v.model_path, 'Select the model and press ⚡ Auto-tune, then ▶ Start', '', ''],
       [S.status?.server?.state === 'ready', 'Chat', 'Chat', 'chat']];
@@ -152,6 +153,9 @@ const Dashboard = {
   update(st) {
     const r = this.refs, s = st.server;
     this.steps();
+    const ext = st.engine === 'external';
+    r.modelRow.style.display = ext ? 'none' : '';
+    r.engineNote.textContent = { llamacpp: '', external: 'Using an external server — set it up under Models → Inference engine.', builtin: 'Using the built-in engine (small models only).' }[st.engine] || '';
     r.state.className = 'badge ' + s.state; r.state.textContent = s.state === 'loading' ? 'loading model…' : s.state;
     r.start.disabled = s.running; r.stop.disabled = !s.running; r.restart.disabled = !s.running;
     r.info.textContent = s.running ? `up ${fmtDur(s.uptime)} · ${s.url}` : '';

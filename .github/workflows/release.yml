@@ -1,4 +1,4 @@
-name: Build Windows exe
+name: Build Windows app
 on:
   push:
     branches: [main]
@@ -8,40 +8,98 @@ on:
       commit_exe:
         description: "Also commit Duckstoken.exe into the repository (main branch)"
         type: boolean
-        default: true
+        default: false
 permissions:
   contents: write
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install build tools
+        run: python -m pip install -r requirements-build.txt
+
       - name: Test
         run: python -W ignore -m unittest discover -s tests
-      - name: Build
+
+      - name: Fetch the llama.cpp engine to bundle
+        run: python tools/fetch_engine.py
+      - name: Check the bundled engine runs on this machine
+        run: .\engine\llama-server.exe --version
+
+      # ---------------------------------------------------------------- portable single exe
+      - name: Build portable Duckstoken.exe
         run: |
-          python -m pip install -r requirements-dev.txt
-          python -m PyInstaller --noconfirm --clean --onefile --console --name Duckstoken --add-data "duckstoken/web;duckstoken/web" duckstoken_launcher.py
-      - name: Smoke test the exe
+          python tools/stamp_build.py --sha $env:GITHUB_SHA --installer 0
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name Duckstoken --icon assets\duckstoken.ico `
+            --add-data "duckstoken/web;duckstoken/web" --add-data "engine;engine" `
+            --hidden-import pystray._win32 --collect-data webview duckstoken_launcher.py
+      - name: Smoke test portable exe
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\Duckstoken.exe -ArgumentList "--no-browser","--port","18999","--data-dir","$env:RUNNER_TEMP\duck" -PassThru
-          Start-Sleep -Seconds 10
-          $html = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18999/).Content
-          if ($html -notmatch "Duckstoken") { throw "UI did not load" }
+          $p = Start-Process -FilePath dist\Duckstoken.exe -ArgumentList "--headless","--port","18999","--data-dir","$env:RUNNER_TEMP\duck1" -PassThru
+          $ok = $false
+          foreach ($i in 1..40) {
+            Start-Sleep -Seconds 3
+            try { if ((Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18999/).Content -match "Duckstoken") { $ok = $true; break } } catch {}
+          }
           Stop-Process -Id $p.Id -Force
+          if (-not $ok) { throw "portable exe: UI did not load" }
+
+      # ---------------------------------------------------------------- installer
+      - name: Build installer payload (folder build)
+        run: |
+          python tools/stamp_build.py --sha $env:GITHUB_SHA --installer 1
+          python -m PyInstaller --noconfirm --clean --onedir --windowed --name Duckstoken --icon assets\duckstoken.ico `
+            --distpath dist-installer --add-data "duckstoken/web;duckstoken/web" --add-data "engine;engine" `
+            --hidden-import pystray._win32 --collect-data webview duckstoken_launcher.py
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress | Out-Null
+          $v = python -c "import duckstoken; print(duckstoken.__version__)"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$v" "/DSourceDir=$PWD\dist-installer\Duckstoken" installer\duckstoken.iss
+          if (-not (Test-Path dist-installer\Duckstoken-Setup.exe)) { throw "installer was not produced" }
+      - name: Smoke test the installer
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\inst"
+          Start-Process -FilePath dist-installer\Duckstoken-Setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dir" -Wait
+          if (-not (Test-Path "$dir\Duckstoken.exe")) { throw "installer did not install the app" }
+          if (-not (Test-Path "$dir\_internal\engine\llama-server.exe")) { throw "engine is missing from the installed app" }
+          $p = Start-Process -FilePath "$dir\Duckstoken.exe" -ArgumentList "--headless","--port","18998","--data-dir","$env:RUNNER_TEMP\duck2" -PassThru
+          $ok = $false
+          foreach ($i in 1..20) {
+            Start-Sleep -Seconds 2
+            try { if ((Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18998/).Content -match "Duckstoken") { $ok = $true; break } } catch {}
+          }
+          Stop-Process -Id $p.Id -Force
+          if (-not $ok) { throw "installed app: UI did not load" }
+
+      # ---------------------------------------------------------------- publish
+      - name: Collect release files + checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory release | Out-Null
+          Copy-Item dist\Duckstoken.exe release\Duckstoken.exe
+          Copy-Item dist-installer\Duckstoken-Setup.exe release\Duckstoken-Setup.exe
+          Get-ChildItem release | Where-Object Name -ne "SHA256SUMS.txt" | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)" } | Set-Content release\SHA256SUMS.txt -Encoding ascii
+          Get-Content release\SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
           name: Duckstoken-windows
-          path: dist/Duckstoken.exe
+          path: release/*
       - name: Publish versioned release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Duckstoken.exe
+          files: release/*
           generate_release_notes: true
       - name: Publish rolling "latest" release
         if: github.ref == 'refs/heads/main'
@@ -50,13 +108,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag --yes 2>$null
-          gh release create latest dist/Duckstoken.exe --prerelease --title "Latest build (main)" --notes "Automatic build of the main branch. Double-click Duckstoken.exe to run." --target $env:GITHUB_SHA
+          $notes = "Automatic build of the main branch.`nDouble-click Duckstoken-Setup.exe to install, or run the portable Duckstoken.exe.`n`nBuild: $env:GITHUB_SHA"
+          gh release create latest release/* --prerelease --title "Latest build (main)" --notes $notes --target $env:GITHUB_SHA
           exit 0
       - name: Commit Duckstoken.exe to main
         if: github.event_name == 'workflow_dispatch' && inputs.commit_exe && github.ref == 'refs/heads/main'
         shell: pwsh
         run: |
-          Copy-Item dist\Duckstoken.exe Duckstoken.exe -Force
+          $size = (Get-Item release\Duckstoken.exe).Length
+          if ($size -gt 95MB) { Write-Warning "Duckstoken.exe is $([math]::Round($size/1MB)) MB; GitHub rejects files over 100 MB. Use the Releases page instead."; exit 0 }
+          Copy-Item release\Duckstoken.exe Duckstoken.exe -Force
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Duckstoken.exe

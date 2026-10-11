@@ -298,6 +298,9 @@ class Handler(LearningApi, BaseHTTPRequestHandler):
         return {"values": APP.settings.all(), "profiles": APP.profiles.names()}
 
     def api_settings_update(self, q, b):
+        wanted = (b.get("values") or {}).get("engine")
+        if wanted and wanted != APP.settings.get("engine"):
+            APP.server.stop()  # never leave the previous engine running unseen
         applied = APP.apply_patch(b.get("values") or {})
         return {"applied": applied, "values": APP.settings.all()}
 

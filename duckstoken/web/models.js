@@ -7,6 +7,7 @@ const Models = {
     r.installed = h('div'); r.hfResult = h('div'); r.engine = h('div'); r.engines = h('div');
     r.repo = h('input', { type: 'text', placeholder: 'owner/name  (e.g. ggml-org/gpt-oss-120b-GGUF)', onkeydown: (e) => e.key === 'Enter' && this.listRepo() });
     r.backend = h('select', { style: 'width:auto' }, ['auto', 'cpu', 'cuda', 'vulkan'].map((b) => h('option', { value: b }, b)));
+    EnginePanel.init(el);
     el.append(
       h('div', { class: 'card' }, h('h2', {}, '📁 Where models are stored'),
         h('div', { class: 'row' }, r.dir, h('button', { onclick: () => this.changeDir() }, 'Change…'),
@@ -17,14 +18,14 @@ const Models = {
         h('div', { class: 'row' }, S.hfQuick.map((q) => h('button', { onclick: () => { r.repo.value = q.repo; this.listRepo(); } }, q.label))),
         h('div', { class: 'row', style: 'margin-top:8px' }, h('div', { class: 'grow' }, r.repo), h('button', { onclick: () => this.listRepo() }, 'List files')),
         r.hfResult),
-      h('div', { class: 'card' }, h('h2', {}, '⚙ Engine (llama.cpp)'),
-        h('p', { class: 'muted' }, 'The engine runs the model. Duckstoken downloads the official llama.cpp build for Windows from GitHub.'),
+      h('div', { class: 'card' }, h('h2', {}, '🚀 GPU builds of llama.cpp (optional)'),
+        h('p', { class: 'muted' }, 'A CPU build of llama.cpp is already bundled. Install a CUDA or Vulkan build from GitHub only if you want GPU acceleration.'),
         r.engines,
         h('div', { class: 'row' }, 'Backend:', r.backend, h('button', { onclick: () => this.findEngine() }, 'Find latest build'),
           h('button', { onclick: async () => { const p = await pickPath({ kind: 'file', ext: '.exe' }); if (p) { await setSetting('llama_server_path', p); this.refresh(); } } }, 'I already have llama-server.exe…')),
         r.engine));
   },
-  async show() { this.refresh(); },
+  async show() { this.refresh(); EnginePanel.refresh(); },
   async refresh() {
     this.refs.dir.textContent = S.values.models_dir || '(default) ~/Duckstoken/models';
     try {
