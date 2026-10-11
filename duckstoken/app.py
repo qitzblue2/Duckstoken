@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import __version__, downloads, gguf, hardware, paths, settings as st, tuner
+from .errors import ApiError
 from .server_proc import ServerManager
 from .tools import TOOLS, ToolRunner
 
@@ -27,12 +28,6 @@ HF_QUICK = [
     {"label": "gpt-oss-120b (~59 GB)", "repo": "ggml-org/gpt-oss-120b-GGUF"},
     {"label": "gpt-oss-20b (~11 GB)", "repo": "ggml-org/gpt-oss-20b-GGUF"},
 ]
-
-
-class ApiError(Exception):
-    def __init__(self, message: str, status: int = 400, **extra):
-        super().__init__(message)
-        self.status, self.extra = status, extra
 
 
 class App:

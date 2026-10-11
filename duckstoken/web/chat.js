@@ -20,11 +20,12 @@ const Chat = {
         h('div', { class: 'chat-head' }, r.status, r.effort,
           h('label', { class: 'row small' }, h('span', { class: 'switch' }, r.tools, h('span')), 'Let AI use my PC'), r.toolsInfo,
           h('span', { style: 'margin-left:auto' }),
+          h('button', { class: 'ghost', title: 'Ask the model what is worth remembering from this chat', onclick: () => this.extractMemories(this.chat, 'ask', false) }, '🧠 Suggest memories'),
           h('button', { class: 'ghost', onclick: () => this.exportChat() }, 'Export'),
           h('button', { class: 'ghost', onclick: () => this.deleteChat(this.cur) }, 'Delete')),
         r.msgs, h('div', { class: 'chat-input' }, r.input, r.send)));
     if (!this.chats.length) this.newChat(); else this.cur = this.chats[0].id;
-    this.renderList(); this.renderMsgs();
+    this.renderList(); this.renderMsgs(); this.pollBig();
   },
   show() { this.syncHeader(); r_focus(this.refs.input); },
   syncHeader() {
@@ -80,7 +81,10 @@ const Chat = {
     if (m.content) el.append(h('div', { class: 'body', html: m.role === 'user' ? '<p>' + escapeHtml(m.content).replace(/\n/g, '<br>') + '</p>' : renderMarkdown(m.content) }));
     (m.tool_calls || []).forEach((tc) => el.append(h('div', { class: 'toolcard' }, h('b', {}, '🔧 ' + tc.function.name), h('pre', {}, tc.function.arguments || ''))));
     if (m.stats) el.append(h('div', { class: 'stats' }, m.stats));
+    if (m.ctx) el.append(this.ctxChips(m.ctx));
+    if (m.big) el.append(this.bigBlock(m));
     if (m.error) el.append(h('div', { class: 'note bad' }, m.error));
+    if (m.done && m.role === 'assistant' && m.content && !(m.tool_calls || []).length) el.append(this.actions(m, el));
     if (!m.content && !m.reasoning && !(m.tool_calls || []).length && !m.error && m.role === 'assistant') el.append(h('span', { class: 'muted' }, '…'));
   },
   apiMessages() {
@@ -113,6 +117,7 @@ const Chat = {
           if (e.name !== 'AbortError') asst.error = e.message; else asst.stats = (asst.stats || '') + ' (stopped)';
         }
         asst.done = true; this.fill(el, asst); this.save();
+        if (ok && !asst.tool_calls.length) this.record(c, asst, el);
         if (!ok || !asst.tool_calls.length) break;
         for (const tc of asst.tool_calls) {
           const out = await this.runTool(tc);
@@ -121,7 +126,7 @@ const Chat = {
         }
         this.save();
       }
-    } finally { this.setBusy(false); this.ctrl = null; this.renderList(); }
+    } finally { this.setBusy(false); this.ctrl = null; this.renderList(); this.armIdleExtract(c); }
   },
   async stream(asst, el) {
     this.ctrl = new AbortController();
@@ -155,6 +160,7 @@ const Chat = {
           if (!line.startsWith('data:')) continue;
           const data = line.slice(5).trim(); if (data === '[DONE]') continue;
           let j; try { j = JSON.parse(data); } catch (e) { continue; }
+          if (j.duck_context) { asst.ctx = j.duck_context; repaint(); continue; }
           if (j.error) throw new Error(j.error.message || JSON.stringify(j.error));
           const ch = j.choices?.[0]; if (ch?.delta) take(ch.delta);
           if (j.timings) stats(j.timings);
@@ -163,6 +169,134 @@ const Chat = {
       }
     }
     asst.tool_calls = calls.filter(Boolean).map((c, i) => ({ ...c, id: c.id || 'call_' + Date.now().toString(36) + i }));
+  },
+  /* ---- learning: record exchange, ratings, corrections, refine, big model, memory ---- */
+  safeUrl(u) { return /^https?:\/\//i.test(u || '') ? u : null; },
+  ctxChips(ctx) {
+    const chips = [], n = (a) => (a || []).length;
+    if (n(ctx.memory_ids)) chips.push(h('span', { class: 'chip', title: 'Memories added to this answer' }, `🧠 ${n(ctx.memory_ids)} memor${n(ctx.memory_ids) === 1 ? 'y' : 'ies'}`));
+    if (n(ctx.example_ids) || n(ctx.lesson_ids)) chips.push(h('span', { class: 'chip', title: 'Past liked answers / feedback notes used' }, `📚 ${n(ctx.example_ids)} example${n(ctx.example_ids) === 1 ? '' : 's'}${n(ctx.lesson_ids) ? ' + ' + n(ctx.lesson_ids) + ' reminder(s)' : ''}`));
+    (ctx.remembered || []).forEach((r) => chips.push(h('span', { class: 'chip good', title: r }, '🧠 remembered: ' + r.slice(0, 50))));
+    const src = ctx.web_sources || [];
+    const box = h('div', { class: 'ctxchips' }, chips);
+    if (src.length) box.append(h('details', { class: 'sources' }, h('summary', { class: 'chip' }, `🌐 ${src.length} web source${src.length === 1 ? '' : 's'}`),
+      src.map((s, i) => h('div', { class: 'small' }, `[${i + 1}] `, this.safeUrl(s.url) ? h('a', { href: s.url, target: '_blank', rel: 'noopener noreferrer' }, s.title || s.url) : (s.title || s.url)))));
+    if (ctx.web_error) box.append(h('span', { class: 'chip bad', title: ctx.web_error }, '🌐 search failed'));
+    return box;
+  },
+  bigBlock(m) {
+    const b = m.big;
+    if (b.pending) return h('div', { class: 'bigblock' }, h('span', { class: 'muted small' }, `🐘 Waiting for the big model… (${b.status || 'queued'}) — see Learning → Big model`));
+    if (b.error) return h('div', { class: 'bigblock' }, h('span', { class: 'note bad' }, '🐘 Big model failed: ' + b.error));
+    return h('div', { class: 'bigblock' }, h('div', { class: 'small muted' }, `🐘 Big model answer${b.model ? ' (' + b.model + ')' : ''}`),
+      h('div', { class: 'body', html: renderMarkdown(b.answer || '') }),
+      h('div', { class: 'row small' }, h('button', { onclick: () => { m.content = b.answer; m.big = null; this.save(); this.renderMsgs(); } }, 'Use this answer instead')));
+  },
+  actions(m, el) {
+    const row = h('div', { class: 'msg-actions' });
+    const btn = (label, title, fn, cls) => row.append(h('button', { class: 'ghost small ' + (cls || ''), title, onclick: fn }, label));
+    const up = m.rating === 1, down = m.rating === -1;
+    btn('👍', 'Good answer — teaches the AI your taste', () => this.rate(m, up ? 0 : 1, '', el), up ? 'on' : '');
+    btn('👎', 'Bad answer — optionally say why', () => this.dislike(m, el), down ? 'on' : '');
+    btn('✏️', 'Write the answer you wanted', () => this.correct(m, el));
+    btn('🔁', 'Critique and rewrite this answer (slower, often better)', () => this.refine(m, el));
+    if (S.values.big_model_path) btn('🐘', 'Ask the big model in the background', () => this.askBig(m, el));
+    btn('🧠', 'Remember something from this', () => this.remember(m));
+    btn('📋', 'Copy', () => navigator.clipboard?.writeText(m.content).then(() => toast('Copied', 'ok')));
+    return row;
+  },
+  async record(c, asst, el) {
+    if (!S.values.record_exchanges) return;
+    const idx = c.messages.indexOf(asst);
+    const prior = c.messages.slice(0, idx).map((m) => { const o = { role: m.role, content: m.content || '' }; if (m.tool_calls?.length) o.tool_calls = m.tool_calls; if (m.role === 'tool') o.tool_call_id = m.tool_call_id; return o; });
+    const st = (asst.stats || '').match(/^(\d+) tokens · ([\d.]+) tok\/s/);
+    try {
+      const r = await api('feedback/record', { chat_id: c.id, msg_index: idx, messages: prior, answer: asst.content, reasoning: asst.reasoning || '',
+        effort: S.values.reasoning_effort, tokens: st ? +st[1] : 0, tps: st ? +st[2] : 0, used_tools: c.messages.slice(0, idx).some((x) => x.role === 'tool'),
+        web_sources: (asst.ctx?.web_sources) || [] });
+      asst.xid = r.id; this.save();
+    } catch (e) { /* logging must never disturb chat */ }
+  },
+  async needX(m) { if (!m.xid) { toast('This answer was not logged (is “Keep a log” on?)', 'err'); return false; } return true; },
+  async rate(m, rating, note, el) {
+    if (!await this.needX(m)) return;
+    try { await api('feedback/rate', { id: m.xid, rating, note: note || '' }); m.rating = rating; this.save(); this.fill(el, m); toast(rating === 1 ? 'Thanks — I’ll use this as an example' : rating === -1 ? 'Noted' : 'Rating cleared', 'ok'); } catch (e) { fail(e); }
+  },
+  async dislike(m, el) {
+    if (!await this.needX(m)) return;
+    if (m.rating === -1) return this.rate(m, 0, '', el);
+    const note = h('textarea', { rows: 3, placeholder: 'What was wrong? (optional — becomes a reminder for similar questions)' });
+    const ok = await modal('Bad answer', note, [{ label: 'Cancel', value: false }, { label: 'Save', value: true, primary: true }]);
+    if (ok) this.rate(m, -1, note.value.trim(), el);
+  },
+  async correct(m, el) {
+    if (!await this.needX(m)) return;
+    const ta = h('textarea', { rows: 10, style: 'width:100%' }, m.content);
+    const ok = await modal('Write the answer you wanted', h('div', {}, h('p', { class: 'muted small' }, 'Saved as a gold example: similar questions will be shown this answer, and it becomes training data.'), ta),
+      [{ label: 'Cancel', value: false }, { label: 'Save correction', value: true, primary: true }]);
+    if (ok && ta.value.trim()) { try { await api('feedback/correct', { id: m.xid, correction: ta.value.trim() }); toast('Saved', 'ok'); } catch (e) { fail(e); } }
+  },
+  async refine(m, el) {
+    const c = this.chat, idx = c.messages.indexOf(m);
+    toast('Refining… this runs the model twice per pass');
+    try {
+      const r = await api('refine', { messages: c.messages.slice(0, idx).filter((x) => x.role === 'user' || x.role === 'assistant').map((x) => ({ role: x.role, content: x.content || '' })), answer: m.content });
+      const body = h('div', {}, h('p', { class: 'muted small' }, 'Critique'), h('pre', { class: 'log', style: 'height:auto;max-height:150px' }, r.critique || '(none)'),
+        h('p', { class: 'muted small' }, 'Improved answer'), h('div', { class: 'body', html: renderMarkdown(r.answer) }));
+      const ok = await modal('Refined answer', body, [{ label: 'Keep original', value: false }, { label: 'Replace', value: true, primary: true }]);
+      if (ok) { m.content = r.answer; m.rating = 0; this.save(); this.fill(el, m); this.record(c, m, el); }
+    } catch (e) { fail(e); }
+  },
+  async askBig(m, el) {
+    if (!await this.needX(m)) return;
+    try {
+      const r = await api('queue/enqueue', { exchange_id: m.xid, chat_id: this.chat.id, reason: 'manual' });
+      m.big = { pending: true, job: r.item.id, status: 'queued' }; this.save(); this.fill(el, m); this.pollBig();
+      toast(S.values.big_run_mode === 'manual' ? 'Queued. Press “Run queue now” in Learning → Big model to start it.' : 'Queued for the big model', 'ok');
+    } catch (e) { fail(e); }
+  },
+  pollBig() {
+    if (this._bigTimer) return;
+    this._bigTimer = setInterval(async () => {
+      const pend = this.chats.flatMap((c) => c.messages).filter((x) => x.big?.pending);
+      if (!pend.length) { clearInterval(this._bigTimer); this._bigTimer = null; return; }
+      for (const m of pend) {
+        try {
+          const j = (await api('queue/get?id=' + m.big.job)).item; m.big.status = j.status;
+          if (j.status === 'done') m.big = { answer: j.answer, model: j.model };
+          else if (j.status === 'error' || j.status === 'cancelled') m.big = { error: j.error || j.status };
+        } catch (e) { m.big = { error: e.message }; }
+      }
+      this.save(); if (document.querySelector('#page-chat.active')) this.renderMsgs();
+    }, 8000);
+  },
+  async remember(m) {
+    const ta = h('textarea', { rows: 4, placeholder: 'One short, self-contained fact or preference' }, (m.content || '').slice(0, 280));
+    const ok = await modal('Remember this', ta, [{ label: 'Cancel', value: false }, { label: 'Save to memory', value: true, primary: true }]);
+    if (ok && ta.value.trim()) { try { await api('memory/add', { text: ta.value.trim(), kind: 'note' }); toast('Remembered', 'ok'); } catch (e) { fail(e); } }
+  },
+  /* suggest memories ~2 min after the last answer (so it never competes with a live chat) */
+  armIdleExtract(c) {
+    clearTimeout(this._idle);
+    const mode = S.values.memory_auto_extract;
+    if (!S.values.memory_enabled || mode === 'off') return;
+    this._idle = setTimeout(() => this.extractMemories(c, mode, true), 120000);
+  },
+  async extractMemories(c, mode, quiet) {
+    const users = c.messages.filter((m) => m.role === 'user').length;
+    if (users < 1 || c.extractedAt === c.messages.length || this.busy) return;
+    if (S.status?.server?.state !== 'ready') { if (!quiet) toast('Start the model server first', 'err'); return; }
+    c.extractedAt = c.messages.length; this.save();
+    try {
+      const r = await api('memory/extract', { messages: c.messages.filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content).map((m) => ({ role: m.role, content: m.content })) });
+      const cands = r.candidates || [];
+      if (!cands.length) { if (!quiet) toast('Nothing worth remembering found', 'ok'); return; }
+      if (mode === 'auto') { for (const t of cands) await api('memory/add', { text: t, kind: 'fact' }); toast(`Remembered ${cands.length} thing(s)`, 'ok'); return; }
+      const boxes = cands.map((t) => [h('input', { type: 'checkbox', checked: true }), t]);
+      const ok = await modal('Remember these?', h('div', {}, boxes.map(([cb, t]) => h('label', { class: 'row', style: 'align-items:flex-start;margin:6px 0' }, cb, h('span', { class: 'grow' }, t)))),
+        [{ label: 'No thanks', value: false }, { label: 'Save selected', value: true, primary: true }]);
+      if (ok) { let n = 0; for (const [cb, t] of boxes) if (cb.checked) { await api('memory/add', { text: t, kind: 'fact' }); n++; } if (n) toast(`Remembered ${n}`, 'ok'); }
+    } catch (e) { if (!quiet) fail(e); }
   },
   async runTool(tc) {
     const name = tc.function.name, body = { name, arguments: tc.function.arguments || '{}' };

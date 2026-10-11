@@ -41,3 +41,11 @@ def audit_file() -> Path:
 
 def server_log_file() -> Path:
     return data_dir() / "llama-server.log"
+
+
+def learning_db_file() -> Path:
+    return data_dir() / "learning.db"
+
+
+def big_server_log_file() -> Path:
+    return data_dir() / "llama-server-big.log"
