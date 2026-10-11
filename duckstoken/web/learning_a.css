@@ -1,0 +1,88 @@
+/* Learning → Memory (lm-*) and Feedback (lf-*) tabs; la-* are the bits they share. Colours come from style.css variables. */
+.la-stats{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.la-stat{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:92px;padding:8px 14px;background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius)}
+.la-stat b{font-size:22px;line-height:1.1}
+.la-stat span{font-size:12px;color:var(--muted)}
+button.la-filter{text-align:left}
+button.la-filter[aria-pressed=true]{border-color:var(--accent);background:rgba(245,184,61,.14)}
+button.la-filter[aria-pressed=true] span{color:var(--text)}
+button.la-chip{border-radius:99px;padding:4px 14px;background:var(--panel2)}
+button.la-chip[aria-pressed=true]{background:var(--accent);color:#1b1500;border-color:var(--accent);font-weight:600}
+.la-select{width:auto;max-width:100%}
+.la-empty{border:1px dashed var(--line);border-radius:var(--radius);padding:16px;text-align:center;color:var(--muted);margin:8px 0}
+.la-empty b{color:var(--text)}
+
+/* memory */
+.lm-gap{margin-top:10px}
+.lm-fold>summary{cursor:pointer;list-style:none}
+.lm-fold>summary::before{content:"▸ ";color:var(--muted)}
+.lm-fold[open]>summary::before{content:"▾ "}
+.lm-fold[open]>summary{margin-bottom:4px}
+.lm-list,.lf-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.lm-item{display:grid;grid-template-columns:auto 1fr auto;gap:10px 12px;padding:10px 12px;border:1px solid var(--line);border-left-width:3px;border-radius:8px;background:var(--panel2)}
+.lm-item.pinned{border-left-color:var(--accent)}
+.lm-item.off .lm-body{opacity:.55}
+.lm-item.busy{opacity:.6;pointer-events:none}
+.lm-item.editing{display:block}
+.lm-ctl{display:flex;flex-direction:column;align-items:center;gap:8px}
+.lm-pin{padding:2px 6px;opacity:.45;filter:grayscale(1)}
+.lm-pin:hover,.lm-pin.on{opacity:1;filter:none}
+.lm-pin.on{border-color:var(--accent);background:rgba(245,184,61,.2)}
+.lm-item .switch input:focus-visible+span{outline:2px solid var(--accent2);outline-offset:2px}
+.lm-body{min-width:0}
+.lm-text{white-space:pre-wrap;overflow-wrap:anywhere}
+.lm-text.clamp{display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden}
+.lm-more{padding:0 2px;color:var(--accent2)}
+.lm-meta{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;margin-top:6px}
+.lm-meta a{color:var(--accent2)}
+.lm-title{color:var(--text)}
+.lm-actions{display:flex;gap:2px;align-items:flex-start}
+.lm-actions button{padding:2px 7px}
+.lm-edit{display:flex;flex-direction:column;gap:8px}
+.lm-foot{justify-content:center;margin-top:12px}
+.lm-pv h3{margin:14px 0 2px}
+.lm-pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#0a0c10;color:#c8d0dc;border:1px solid var(--line);border-radius:8px;padding:10px;margin:6px 0;max-height:260px;overflow:auto;font:12px/1.45 var(--mono)}
+.lm-matches{list-style:none;margin:6px 0;padding:0}
+.lm-matches li{padding:6px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.lm-matches li.skipped{opacity:.6}
+
+/* feedback */
+.lf-item{border:1px solid var(--line);border-left-width:3px;border-radius:8px;background:var(--panel2)}
+.lf-item.up{border-left-color:var(--good)}
+.lf-item.down{border-left-color:var(--bad)}
+.lf-item.busy{opacity:.6;pointer-events:none}
+.lf-row{display:flex;align-items:flex-start;gap:6px}
+.lf-head{flex:1;min-width:0;display:flex;align-items:flex-start;gap:8px;text-align:left;background:none;border:0;border-radius:8px;padding:10px 6px 10px 10px}
+.lf-chev{color:var(--muted);width:12px;flex:none}
+.lf-sum{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+.lf-prompt,.lf-snippet{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.lf-prompt{font-weight:600}
+.lf-snippet{color:var(--muted)}
+.lf-item.open .lf-snippet{display:none}
+.lf-tags{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.badge.lf-big{background:rgba(77,163,255,.15);color:var(--accent2);border-color:var(--accent2)}
+.lf-actions{display:flex;gap:2px;flex:none;padding:8px 8px 0 0}
+.lf-ic{padding:3px 8px;border-radius:6px}
+.lf-ic.on{background:rgba(245,184,61,.25);border-color:var(--accent)}
+.lf-detail{display:flex;flex-direction:column;gap:12px;padding:0 14px 12px 30px}
+.lf-block{border-left:3px solid var(--line);padding-left:10px;min-width:0}
+.lf-block.good{border-color:var(--good)}
+.lf-block.big{border-color:var(--accent2)}
+.lf-block.bad{border-color:var(--bad)}
+.lf-label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:2px}
+.lf-text{white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto}
+.lf-msg{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin-top:6px}
+.lf-msg.user{background:rgba(77,163,255,.12)}
+.lf-msg b{font-size:12px;color:var(--muted)}
+.lf-ctx{border-left:3px solid var(--line);padding-left:10px;color:var(--muted);overflow-wrap:anywhere}
+.lf-editor{min-height:220px}
+.lf-pager{justify-content:center;margin-top:12px}
+
+@media(max-width:800px){
+  .lm-item{grid-template-columns:auto 1fr}
+  .lm-actions{grid-column:1/-1;justify-content:flex-end}
+  .lf-row{flex-wrap:wrap}
+  .lf-actions{width:100%;justify-content:flex-end;padding:0 8px 8px}
+  .lf-detail{padding-left:14px}
+  .la-stat{flex:1 1 120px}
+}

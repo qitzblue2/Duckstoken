@@ -31,9 +31,20 @@ window.LearnFeedback = (() => {
     renderStats();
   }
 
+  function buildFilters() {
+    ui.chips = FILTERS.map((f) => {
+      const num = h('b', {}, '–');
+      return { f, num, btn: h('button', { class: 'la-stat la-filter', onclick: () => setFilter(f.id) }, num, h('span', {}, f.label)) };
+    });
+    renderStats();
+    return ui.chips.map((c) => c.btn);
+  }
+
   function renderStats() {
-    clear(ui.stats).append(FILTERS.map((f) => h('button', { class: 'la-stat la-filter', 'aria-pressed': String(st.filter === f.id), onclick: () => setFilter(f.id) },
-      h('b', {}, st.stats ? String(st.stats[f.stat] || 0) : '–'), h('span', {}, f.label))));
+    ui.chips.forEach(({ f, btn, num }) => {
+      num.textContent = st.stats ? String(st.stats[f.stat] || 0) : '–';
+      btn.setAttribute('aria-pressed', String(st.filter === f.id));
+    });
   }
 
   function setFilter(id) {
@@ -69,7 +80,7 @@ window.LearnFeedback = (() => {
       if (!items.length && st.page > 0 && st.total > 0) { st.page = Math.ceil(st.total / PAGE) - 1; load(); return; }
       st.items = items;
       rows.clear();
-      clear(ui.list).append(items.map((it) => { const el = h('article'); rows.set(it.id, el); mount(el, it); return el; }));
+      clear(ui.list).append(...items.map((it) => { const el = h('article'); rows.set(it.id, el); mount(el, it); return el; }));
     } catch (e) {
       if (seq !== st.seq) return;
       st.error = e.message;
@@ -112,20 +123,19 @@ window.LearnFeedback = (() => {
     const isOpen = open.has(it.id);
     el.className = 'lf-item' + (it.rating === 1 ? ' up' : it.rating === -1 ? ' down' : '') + (isOpen ? ' open' : '');
     const icon = (label, title, pressed, fn) => h('button', { class: 'ghost lf-ic' + (pressed ? ' on' : ''), title, 'aria-label': title, 'aria-pressed': pressed == null ? null : String(pressed), onclick: fn }, label);
-    clear(el).append(
-      h('div', { class: 'lf-row' },
-        h('button', { class: 'lf-head', 'aria-expanded': String(isOpen), onclick: () => toggle(el, it) },
-          h('span', { class: 'lf-chev', 'aria-hidden': 'true' }, isOpen ? '▾' : '▸'),
-          h('span', { class: 'lf-sum' },
-            h('span', { class: 'lf-prompt' }, clip(flat(it.prompt), 200) || '(no question text)'),
-            h('span', { class: 'lf-snippet' }, (it.correction ? '✏️ ' : '') + clip(flat(it.correction || it.answer), 240)),
-            tags(it))),
-        h('div', { class: 'lf-actions' },
-          icon('👍', it.rating === 1 ? 'Remove 👍' : 'Good answer: show it as an example next time', it.rating === 1, () => rate(el, it, it.rating === 1 ? 0 : 1)),
-          icon('👎', it.rating === -1 ? 'Edit or remove 👎' : 'Bad answer: say what was wrong', it.rating === -1, () => dislike(el, it)),
-          icon('✏️', 'Write the answer you wanted', !!it.correction, () => correct(el, it)),
-          icon('🗑', 'Delete this entry', null, () => remove(it)))),
-      isOpen ? detail(it) : null);
+    const head = h('button', { class: 'lf-head', 'aria-expanded': String(isOpen), onclick: () => toggle(el, it) },
+      h('span', { class: 'lf-chev', 'aria-hidden': 'true' }, isOpen ? '▾' : '▸'),
+      h('span', { class: 'lf-sum' },
+        h('span', { class: 'lf-prompt' }, clip(flat(it.prompt), 200) || '(no question text)'),
+        h('span', { class: 'lf-snippet' }, (it.correction ? '✏️ ' : '') + clip(flat(it.correction || it.answer), 240)),
+        tags(it)));
+    const actions = h('div', { class: 'lf-actions' },
+      icon('👍', it.rating === 1 ? 'Remove 👍' : 'Good answer: show it as an example next time', it.rating === 1, () => rate(el, it, it.rating === 1 ? 0 : 1)),
+      icon('👎', it.rating === -1 ? 'Edit or remove 👎' : 'Bad answer: say what was wrong', it.rating === -1, () => dislike(el, it)),
+      icon('✏️', 'Write the answer you wanted', !!it.correction, () => correct(el, it)),
+      icon('🗑', 'Delete this entry', null, () => remove(it)));
+    clear(el).append(h('div', { class: 'lf-row' }, head, actions));
+    if (isOpen) el.append(detail(it));
   }
 
   function toggle(el, it) {
@@ -176,28 +186,33 @@ window.LearnFeedback = (() => {
   }
 
   /* -------------------------------------------------------------- actions */
-  function apply(next) {
+  const controls = (el) => [...el.querySelectorAll('button')];
+  const focusIndex = (el) => controls(el).indexOf(document.activeElement);
+
+  function apply(next, focus) {
     const i = st.items.findIndex((x) => x.id === next.id);
     if (i < 0) return;
     st.items[i] = { ...st.items[i], ...next };
-    mount(rows.get(next.id), st.items[i]);
+    const el = rows.get(next.id);
+    mount(el, st.items[i]);
+    if (focus >= 0 && controls(el)[focus]) controls(el)[focus].focus();
   }
 
-  async function send(el, path, body) {
+  /* `focus` is the index of the button that was focused before the row was rebuilt, so keyboard users keep their place */
+  async function send(el, path, body, focus = focusIndex(el)) {
     el.classList.add('busy');
     try {
       const d = await api(path, body);
       if (!d || !d.item) throw new Error('The server sent an unexpected reply');
-      apply(d.item);
+      apply(d.item, focus);
       loadStats();
-      return true;
-    } catch (e) { fail(e); return false; } finally { el.classList.remove('busy'); }
+    } catch (e) { fail(e); } finally { el.classList.remove('busy'); }
   }
 
-  const rate = (el, it, rating, note = '') => send(el, 'feedback/rate', { id: it.id, rating, note });
+  const rate = (el, it, rating, note = '', focus) => send(el, 'feedback/rate', { id: it.id, rating, note }, focus);
 
   async function dislike(el, it) {
-    const had = it.rating === -1;
+    const had = it.rating === -1, focus = focusIndex(el);
     const note = h('textarea', { rows: 4, maxlength: MAX_NOTE, 'aria-label': 'What was wrong?', placeholder: 'What was wrong? (optional)' }, had ? str(it.note) : '');
     const pending = modal(had ? 'Edit your 👎' : 'Bad answer',
       h('div', {}, h('div', { class: 'lf-ctx' }, clip(flat(it.prompt), 160)),
@@ -205,12 +220,12 @@ window.LearnFeedback = (() => {
       [{ label: 'Cancel', value: false }, ...(had ? [{ label: 'Remove 👎', value: 'clear' }] : []), { label: 'Save', value: true, primary: true }]);
     note.focus();
     const r = await pending;
-    if (r === true) rate(el, it, -1, note.value.trim());
-    else if (r === 'clear') rate(el, it, 0);
+    if (r === true) rate(el, it, -1, note.value.trim(), focus);
+    else if (r === 'clear') rate(el, it, 0, '', focus);
   }
 
   async function correct(el, it) {
-    const start = str(it.correction) || str(it.answer);
+    const start = str(it.correction) || str(it.answer), focus = focusIndex(el);
     const ta = h('textarea', { rows: 12, class: 'lf-editor', 'aria-label': 'The answer you wanted' }, start);
     const pending = modal('Write the answer you wanted',
       h('div', {}, h('div', { class: 'lf-ctx' }, clip(flat(it.prompt), 160)),
@@ -218,12 +233,12 @@ window.LearnFeedback = (() => {
       [{ label: 'Cancel', value: false }, ...(it.correction ? [{ label: 'Remove correction', value: 'clear' }] : []), { label: 'Save correction', value: true, primary: true }]);
     ta.focus();
     const r = await pending;
-    if (r === 'clear') { send(el, 'feedback/correct', { id: it.id, correction: '' }); return; }
+    if (r === 'clear') { send(el, 'feedback/correct', { id: it.id, correction: '' }, focus); return; }
     if (r !== true) return;
     const text = ta.value.trim();
     if (!text) toast('Write the answer first, or use “Remove correction”', 'err');
     else if (text === start.trim()) toast('Nothing changed yet. Edit the answer first', 'err');
-    else send(el, 'feedback/correct', { id: it.id, correction: text });
+    else send(el, 'feedback/correct', { id: it.id, correction: text }, focus);
   }
 
   async function remove(it) {
@@ -239,14 +254,13 @@ window.LearnFeedback = (() => {
 
   function init(el) {
     ui.off = h('div', { class: 'note warn', hidden: true });
-    ui.stats = h('div', { class: 'la-stats', role: 'group', 'aria-label': 'Filter by rating' });
+    ui.stats = h('div', { class: 'la-stats', role: 'group', 'aria-label': 'Filter by rating' }, buildFilters());
     ui.search = h('input', { type: 'text', maxlength: 200, placeholder: '🔍 Search questions, answers and notes…', 'aria-label': 'Search the log',
       oninput: debounce((e) => { st.q = e.target.value.trim(); st.page = 0; load(); }, 300),
       onkeydown: (e) => { if (e.key === 'Escape' && e.target.value) { e.target.value = ''; st.q = ''; st.page = 0; load(); } } });
     ui.state = h('div', { 'aria-live': 'polite' });
     ui.list = h('div', { class: 'lf-list' });
     ui.pager = h('div', { class: 'row lf-pager' });
-    renderStats();
     el.append(
       h('div', { class: 'card' }, h('h2', {}, '👍 Your feedback on the AI’s answers'),
         h('p', { class: 'muted' }, '👍 and ✏️ answers are shown to the AI as examples when you ask something similar; 👎 notes become reminders. Rated, corrected and big-model answers can also become training data.'),

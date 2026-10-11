@@ -18,8 +18,15 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, downloads, gguf, hardware, paths, settings as st, tuner
+from . import __version__, api_learning, bundle, context, downloads, gguf, hardware, paths, settings as st, tuner, websearch
+from .api_learning import LearningApi, post
+from .dataset import DatasetStore
+from .db import Database
+from .engines import ENGINE_LABELS, EngineSwitch, load_engines
 from .errors import ApiError
+from .escalation import EscalationWorker, QueueStore
+from .feedback import ExchangeStore
+from .memory import MemoryStore
 from .server_proc import ServerManager
 from .tools import TOOLS, ToolRunner
 
@@ -34,9 +41,18 @@ class App:
     def __init__(self):
         self.settings = st.SettingsStore()
         self.profiles = st.ProfileStore()
-        self.server = ServerManager()
+        self.engines = load_engines()
+        self.server = EngineSwitch(self.engines, self.settings.all)  # whichever engine the settings select
+        self.big = ServerManager(log_file=paths.big_server_log_file())  # the big model is always llama.cpp
         self.jobs = downloads.JobManager()
-        self.tools = ToolRunner(self.settings.all)
+        self.db = Database()
+        self.memory = MemoryStore(self.db)
+        self.exchanges = ExchangeStore(self.db, self.memory)
+        self.queue = QueueStore(self.db)
+        self.dataset = DatasetStore(self.db, self.exchanges)
+        self.worker = EscalationWorker(self.db, self.settings.all, self.server, self.big, self.exchanges, self.queue)
+        self.tools = ToolRunner(self.settings.all, memory=self.memory, web=websearch)
+        api_learning.bind(self)
         self.token = secrets.token_urlsafe(24)
         self.httpd: ThreadingHTTPServer | None = None
         self._gguf_cache: dict = {}
@@ -80,13 +96,12 @@ class App:
 
     def chat_payload(self, body: dict) -> dict:
         s = self.settings.all()
-        msgs = list(body.get("messages") or [])
-        if s["system_prompt"].strip() and not (msgs and msgs[0].get("role") == "system"):
-            msgs.insert(0, {"role": "system", "content": s["system_prompt"]})
-        p = {"model": "local", "messages": msgs, "stream": bool(s["stream"]),
+        msgs, info = context.augment(list(body.get("messages") or []), s, self.memory, self.exchanges, websearch)
+        p = {"model": self.server.model_name(), "messages": msgs, "stream": bool(s["stream"]),
              "temperature": s["temperature"], "top_p": s["top_p"], "top_k": s["top_k"], "min_p": s["min_p"],
              "repeat_penalty": s["repeat_penalty"], "presence_penalty": s["presence_penalty"],
              "frequency_penalty": s["frequency_penalty"],
+             "reasoning_effort": s["reasoning_effort"],
              "chat_template_kwargs": {"reasoning_effort": s["reasoning_effort"]}}
         if int(s["mirostat"]):
             p.update(mirostat=int(s["mirostat"]), mirostat_tau=s["mirostat_tau"], mirostat_eta=s["mirostat_eta"])
@@ -98,6 +113,7 @@ class App:
             defs = self.tools.definitions()
             if defs:
                 p["tools"] = defs
+        p["_duck_context"] = info
         return p
 
     def disk_benchmark(self, path: str, mb: int = 256) -> dict:
@@ -132,8 +148,10 @@ class App:
                 "note": "Read speed may be inflated by the Windows file cache; treat it as an upper bound."}
 
     def shutdown(self) -> None:
+        self.worker.stop()
         if self.settings.get("stop_server_on_exit"):
             self.server.stop()
+            self.big.stop()
         if self.httpd:
             threading.Thread(target=self.httpd.shutdown, daemon=True).start()
 
@@ -170,7 +188,7 @@ def _browse(path: str, want_files: bool, ext: str) -> dict:
 
 
 # ============================================================ HTTP handler
-class Handler(BaseHTTPRequestHandler):
+class Handler(LearningApi, BaseHTTPRequestHandler):
     server_version = "Duckstoken/" + __version__
     protocol_version = "HTTP/1.0"
 
@@ -261,7 +279,8 @@ class Handler(BaseHTTPRequestHandler):
     # ============================================================ API
     # state ------------------------------------------------------------
     def api_status(self, q, b):
-        return {"version": __version__, "server": APP.server.status(), "jobs": APP.jobs.list(),
+        return {"version": __version__, "engine": APP.settings.get("engine"), "server": APP.server.status(),
+                "jobs": APP.jobs.list(),
                 "model_path": APP.settings.get("model_path")}
 
     def api_hardware(self, q, b):
@@ -416,8 +435,32 @@ class Handler(BaseHTTPRequestHandler):
         time.sleep(0.5)
         return self.api_server_start(q, b)
 
+    # engines -----------------------------------------------------------
+    def api_engine_info(self, q, b):
+        s = APP.settings.all()
+        out = []
+        for eid in ("llamacpp", "external", "builtin"):
+            eng = APP.engines.get(eid)
+            if eng is None:
+                info = {"available": False, "problem": "Not included in this build (needs NumPy)."}
+            else:
+                info = eng.describe(s)
+            out.append({"id": eid, "label": ENGINE_LABELS[eid], **info})
+        return {"selected": s["engine"], "engines": out, "bundled": bundle.bundled_llama_server() is not None}
+
+    @post
+    def api_engine_test(self, q, b):
+        return APP.engines["external"].probe(APP.settings.all())
+
+    def api_engine_builtin_catalog(self, q, b):
+        if "builtin" not in APP.engines:
+            raise ApiError("The built-in engine is not available in this build.")
+        from .engines.builtin.catalog import recommended_models
+        return {"models": recommended_models()}
+
     def api_server_logs(self, q, b):
-        return APP.server.logs(int(q.get("since") or 0))
+        which = APP.big if q.get("which") == "big" else APP.server
+        return which.logs(int(q.get("since") or 0))
 
     # tools -------------------------------------------------------------
     def api_tools_schema(self, q, b):
@@ -466,15 +509,16 @@ class Handler(BaseHTTPRequestHandler):
         if status["state"] != "ready":
             raise ApiError("The model server is not ready. Start it on the Dashboard and wait for 'ready'.", 503)
         payload = APP.chat_payload(b)
+        duck_context = payload.pop("_duck_context", {})
         req = urllib.request.Request(APP.server.base_url() + "/v1/chat/completions",
                                      data=json.dumps(payload).encode(), headers=APP.server.upstream_headers())
         try:
             up = urllib.request.urlopen(req, timeout=APP.settings.get("server_timeout"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:2000]
-            raise ApiError(f"llama-server error {e.code}: {detail}", 502) from e
+            raise ApiError(f"The model engine answered HTTP {e.code}: {detail}", 502) from e
         except (urllib.error.URLError, OSError) as e:
-            raise ApiError(f"Cannot reach llama-server: {e}", 502) from e
+            raise ApiError(f"Cannot reach the model engine: {e}", 502) from e
         with up:
             if not payload["stream"]:
                 self._send(200, up.read())
@@ -484,6 +528,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             try:
+                self.wfile.write(b"data: " + json.dumps({"duck_context": duck_context}).encode() + b"\n\n")
+                self.wfile.flush()
                 while True:
                     line = up.readline()
                     if not line:
@@ -525,6 +571,7 @@ def run(open_browser: bool | None = None, port: int | None = None) -> None:
     url = f"http://127.0.0.1:{APP.port}/"
     print(f"Duckstoken {__version__} is running at {url}\nClose this window (or press Ctrl+C) to quit.")
     threading.Thread(target=hardware.get_hardware, daemon=True).start()  # warm the slow probes
+    APP.worker.start()
     if APP.settings.get("autostart_server"):
         try:
             APP.server.start(APP.settings.all())
@@ -540,6 +587,8 @@ def run(open_browser: bool | None = None, port: int | None = None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        APP.worker.stop()
         if APP.settings.get("stop_server_on_exit"):
             APP.server.stop()
+            APP.big.stop()
         APP.httpd.server_close()

@@ -30,7 +30,7 @@ window.LearnMemory = (() => {
 
   function kindSelect(kinds, value, label = 'Kind') {
     const all = kinds.includes(value) ? kinds : [...kinds, value];
-    return h('select', { 'aria-label': label }, all.map((k) => h('option', { value: k, selected: k === value, title: kindInfo(k)[2] }, kindInfo(k)[1])));
+    return h('select', { class: 'la-select', 'aria-label': label }, all.map((k) => h('option', { value: k, selected: k === value, title: kindInfo(k)[2] }, kindInfo(k)[1])));
   }
 
   async function busy(btn, fn) {
@@ -68,7 +68,7 @@ window.LearnMemory = (() => {
     Object.keys(by).forEach((k) => { if (!names.includes(k)) names.push(k); });
     const count = (n) => (st.stats ? ` (${n || 0})` : '');
     clear(ui.kind).append(h('option', { value: '' }, 'All kinds' + count(st.stats && st.stats.total)),
-      names.map((k) => h('option', { value: k }, kindInfo(k)[1] + count(by[k]))));
+      ...names.map((k) => h('option', { value: k }, kindInfo(k)[1] + count(by[k]))));
     ui.kind.value = names.includes(st.kind) ? st.kind : '';
     syncClearButton();
   }
@@ -174,7 +174,7 @@ window.LearnMemory = (() => {
     const title = h('input', { type: 'text', maxlength: 200, placeholder: 'Title (optional)', 'aria-label': 'Title', value: it.title || '' });
     const url = h('input', { type: 'text', maxlength: 2000, placeholder: 'Source link (optional)', 'aria-label': 'Source link', value: it.url || '' });
     const save = h('button', { class: 'primary' }, 'Save');
-    const cancel = () => mount(el, it);
+    const cancel = () => remount(el, it);
     const submit = () => busy(save, async () => {
       const changes = {}, t = text.value.trim(), u = url.value.trim();
       if (!t) { toast('A memory needs some text', 'err'); text.focus(); return; }
@@ -208,14 +208,23 @@ window.LearnMemory = (() => {
   async function change(el, it, fields) {
     el.classList.add('busy');
     const next = await update(it, fields);
-    if (next) { apply(next); loadStats(); } else mount(el, it);
+    if (next) { apply(next); loadStats(); } else remount(el, it);
   }
 
   function apply(next) {
     const i = st.items.findIndex((x) => x.id === next.id);
     if (i >= 0) st.items[i] = next;
     const el = rows.get(next.id);
-    if (el) mount(el, next);
+    if (el) remount(el, next);
+  }
+
+  /* Rebuilds a row but keeps keyboard focus on the same control (or on ✏️ after leaving the editor). */
+  function remount(el, it) {
+    const controls = () => [...el.querySelectorAll('button, input')];
+    const editing = el.classList.contains('editing'), spot = editing ? -1 : controls().indexOf(document.activeElement);
+    mount(el, it);
+    if (editing) el.querySelector('.lm-actions button').focus();
+    else if (spot >= 0 && controls()[spot]) controls()[spot].focus();
   }
 
   async function remove(it) {
@@ -391,7 +400,7 @@ window.LearnMemory = (() => {
       if (f) importFile(f).catch(fail);
     } });
     ui.clearBtn = h('button', { class: 'danger', onclick: (e) => busy(e.currentTarget, clearMemories) }, 'Delete everything…');
-    ui.kind = h('select', { 'aria-label': 'Filter by kind', onchange: (e) => { st.kind = e.target.value; syncClearButton(); load(); } });
+    ui.kind = h('select', { class: 'la-select', 'aria-label': 'Filter by kind', onchange: (e) => { st.kind = e.target.value; syncClearButton(); load(); } });
     ui.search = h('input', { type: 'text', maxlength: 200, placeholder: '🔍 Search memories…', 'aria-label': 'Search memories', oninput: debounce((e) => { st.q = e.target.value.trim(); load(); }, 250),
       onkeydown: (e) => { if (e.key === 'Escape' && e.target.value) { e.target.value = ''; st.q = ''; load(); } } });
     ui.state = h('div', { 'aria-live': 'polite' });

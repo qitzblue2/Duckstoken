@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from . import paths
+from . import bundle, paths
 from .settings import SCHEMA
 
 _PRIORITY = {"idle": 0x40, "below_normal": 0x4000, "normal": 0x20, "above_normal": 0x8000, "high": 0x80}
@@ -69,6 +69,14 @@ def _bind_lifetime(proc: subprocess.Popen) -> None:
         pass
 
 
+def find_llama_server(s: dict) -> Path | None:
+    """The configured llama-server, else the one bundled in the app."""
+    configured = s.get("llama_server_path", "")
+    if configured and Path(configured).is_file():
+        return Path(configured)
+    return bundle.bundled_llama_server()
+
+
 def connect_host(host: str) -> str:
     return "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
 
@@ -111,6 +119,10 @@ def build_args(s: dict) -> list[str]:
 
 
 class ServerManager:
+    engine_id = "llamacpp"
+    label = "llama.cpp"
+    swappable = True  # stopping it really frees the model's RAM
+
     def __init__(self, log_file: Path | None = None):
         self.log_file = log_file or paths.server_log_file()
         self.proc: subprocess.Popen | None = None
@@ -146,9 +158,11 @@ class ServerManager:
         with self._lock:
             if self.proc and self.proc.poll() is None:
                 raise RuntimeError("The model server is already running")
-            exe, model = s.get("llama_server_path", ""), s.get("model_path", "")
-            if not exe or not Path(exe).is_file():
-                raise RuntimeError("llama-server is not set up yet. Open Models -> Engine and install it.")
+            found, model = find_llama_server(s), s.get("model_path", "")
+            exe = str(found) if found else ""
+            if not exe:
+                raise RuntimeError("The llama.cpp engine is not installed. Open Models → Engine and install it, "
+                                   "or pick another engine in Settings → Engine.")
             if not model or not Path(model).is_file():
                 raise RuntimeError("No model selected. Pick a .gguf file in the Models tab.")
             self.host = connect_host(s["host"])
@@ -230,6 +244,15 @@ class ServerManager:
 
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
+
+    def model_name(self) -> str:
+        return "local"
+
+    def describe(self, s: dict) -> dict:
+        exe = find_llama_server(s)
+        if not exe:
+            return {"available": False, "problem": "llama.cpp is not installed yet.", "bundled": False}
+        return {"available": True, "path": str(exe), "bundled": exe == bundle.bundled_llama_server()}
 
     def upstream_headers(self) -> dict:
         h = {"Content-Type": "application/json"}

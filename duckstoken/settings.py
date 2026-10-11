@@ -25,6 +25,8 @@ GROUPS = [
     ("learning", "Learning & memory"),
     ("web", "Web & research"),
     ("big", "Big model (escalation)"),
+    ("engine", "Engine"),
+    ("app", "App & updates"),
 ]
 
 CACHE_TYPES = ["f16", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl", "bf16", "f32"]
@@ -286,6 +288,34 @@ SCHEMA: list[dict] = [
        "Optional. A fine-tune trained from your exported data (see Learning → Training data).", kind="file",
        advanced=True),
     _s("lora_scale", "LoRA strength", "server", "float", 1.0, min=0, max=4, advanced=True),
+
+    # ------------------------------------------------------------------ engine
+    _s("engine", "Inference engine", "engine", "select", "llamacpp",
+       "llamacpp = the bundled llama.cpp engine (fast, runs huge models). external = Ollama / LM Studio / any "
+       "OpenAI-compatible server you already run. builtin = Duckstoken's own pure-Python engine (small models only).",
+       options=["llamacpp", "external", "builtin"]),
+    _s("external_preset", "External server", "engine", "select", "ollama", options=["ollama", "lmstudio", "custom"],
+       help="Where the external engine listens. Ollama: 11434, LM Studio: 1234."),
+    _s("external_url", "Custom server URL", "engine", "str", "http://127.0.0.1:8000",
+       "Used when the preset is 'custom'. Must speak the OpenAI /v1 API."),
+    _s("external_api_key", "External API key", "engine", "password", "", "Only if the server requires one."),
+    _s("external_model", "External model name", "engine", "str", "",
+       "Leave empty to use the first model the server reports."),
+    _s("builtin_threads", "Built-in engine threads (0 = auto)", "engine", "int", 0, min=0, max=256, advanced=True),
+
+    # --------------------------------------------------------------------- app
+    _s("window_mode", "Open Duckstoken in", "app", "select", "native",
+       "native = its own window (needs WebView2, preinstalled on Windows 11). browser = your default web browser.",
+       options=["native", "browser"]),
+    _s("minimize_to_tray", "Keep running in the system tray when the window is closed", "app", "bool", True,
+       "The model server keeps running. Right-click the tray icon to quit."),
+    _s("start_minimized", "Start hidden in the tray", "app", "bool", False),
+    _s("launch_at_startup", "Start Duckstoken when I sign in to Windows", "app", "bool", False),
+    _s("update_channel", "Update channel", "app", "select", "stable",
+       "stable = tagged releases. latest = every build of the main branch. off = never check.",
+       options=["off", "stable", "latest"]),
+    _s("update_auto_install", "Install updates automatically on exit", "app", "bool", False,
+       "Off: you are asked first. Updates are verified against a published SHA-256 before being applied."),
 ]
 
 SCHEMA_BY_KEY = {s["key"]: s for s in SCHEMA}
