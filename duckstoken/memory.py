@@ -41,6 +41,7 @@ USER_MESSAGE_CHARS = 1500
 ASSISTANT_MESSAGE_CHARS = 500
 MAX_REPLY_CHARS = 20_000
 MAX_ARRAY_ATTEMPTS = 20
+MIN_MEMORY_CHARS = 3
 
 CONTEXT_HEADER = "Things you know about the user and their world (use when relevant, ignore otherwise):"
 MIN_LINE_ROOM = 24
@@ -518,7 +519,7 @@ class MemoryStore:
     # ------------------------------------------------------------------ text helpers (no model involved)
     @staticmethod
     def candidates_from_text(text) -> list[str]:
-        """Explicit things the user said about themselves ("remember that…", "my name is…", "I prefer…", "always…").
+        """Explicit things the user said about themselves: "remember that…", "my name is…", "I prefer…", "always…".
 
         `text` must be the user's own words. Questions, one-off remarks and anything that looks like a secret are
         skipped; the user's wording is kept so nothing is rewritten wrongly.
@@ -717,7 +718,7 @@ def parse_extraction(model_text: str, max_items: int) -> list[str]:
     seen: set[str] = set()
     for raw in _first_string_array(model_text[:MAX_REPLY_CHARS]):
         text = " ".join(raw.split())
-        if not text or _looks_secret(text):
+        if len(text) < MIN_MEMORY_CHARS or _looks_secret(text):
             continue
         text = _shorten(text, CANDIDATE_CHARS)
         key = _norm(text)
