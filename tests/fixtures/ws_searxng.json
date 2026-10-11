@@ -1,0 +1,14 @@
+{
+  "query": "duck",
+  "number_of_results": 0,
+  "results": [
+    {"url": "https://en.wikipedia.org/wiki/Duck", "title": "Duck - Wikipedia", "content": "Duck is the common name for numerous species of waterfowl &amp; relatives.", "engine": "wikipedia", "score": 3.0},
+    {"url": "https://example.org/ducks?x=1&y=2", "title": "<b>Ducks</b> of the world", "content": "A <em>field</em> guide.", "engine": "duckduckgo"},
+    {"url": "ftp://files.example.org/ducks.zip", "title": "Not a web page", "content": "ignored because of the scheme"},
+    {"url": "https://en.wikipedia.org/wiki/Duck", "title": "Duplicate of the first", "content": "dropped"},
+    {"title": "No url at all", "content": "ignored"},
+    "not even an object"
+  ],
+  "infoboxes": [],
+  "suggestions": ["ducks"]
+}

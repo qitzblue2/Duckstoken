@@ -101,6 +101,9 @@ def build_args(s: dict) -> list[str]:
             args += [flag, "0"]
             continue
         args += [flag, str(val)]
+    if s.get("lora_path"):
+        scale = float(s.get("lora_scale", 1.0))
+        args += ["--lora", s["lora_path"]] if scale == 1.0 else ["--lora-scaled", s["lora_path"], str(scale)]
     extra = (s.get("extra_args") or "").strip()
     if extra:
         args += split_args(extra)
@@ -108,7 +111,8 @@ def build_args(s: dict) -> list[str]:
 
 
 class ServerManager:
-    def __init__(self):
+    def __init__(self, log_file: Path | None = None):
+        self.log_file = log_file or paths.server_log_file()
         self.proc: subprocess.Popen | None = None
         self.state = "stopped"  # stopped starting loading ready error
         self.error = ""
@@ -126,7 +130,7 @@ class ServerManager:
                 self._log_base += 1
             self._log.append(line)
         try:
-            with open(paths.server_log_file(), "a", encoding="utf-8", errors="replace") as f:
+            with open(self.log_file, "a", encoding="utf-8", errors="replace") as f:
                 f.write(line + "\n")
         except OSError:
             pass
@@ -155,7 +159,7 @@ class ServerManager:
                 flags = 0x08000000 | _PRIORITY.get(s.get("process_priority", "normal"), 0x20)
             self._append(f"$ {subprocess.list2cmdline(self.cmdline)}")
             try:
-                paths.server_log_file().write_text("", encoding="utf-8")
+                self.log_file.write_text("", encoding="utf-8")
             except OSError:
                 pass
             self.error = ""

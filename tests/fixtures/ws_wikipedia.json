@@ -1,0 +1,35 @@
+{
+ "batchcomplete": true,
+ "continue": {
+  "gsroffset": 3,
+  "continue": "gsroffset||"
+ },
+ "query": {
+  "pages": [
+   {
+    "pageid": 23862,
+    "ns": 0,
+    "title": "Python (programming language)",
+    "index": 1,
+    "extract": "Python is a high-level, general-purpose programming language that emphasizes code readability, simplicity, and ease-of-writing with the use of significant indentation, an extensive (\"batteries-included\") standard library, and garbage collection. Python supports multiple programming paradigms but with an emphasis on object-oriented programming and dynamic typing.\nGuido van Rossum began working on Python in the late 1980s as a successor to the ABC programming language. Python 3.0, released in 2008, was a major revision and not completely backward-compatible with earlier versions."
+   },
+   {
+    "pageid": 73729965,
+    "ns": 0,
+    "title": "Mojo (programming language)",
+    "index": 3,
+    "extract": "Mojo is a programming language for Linux and macOS. It is a system programming language with semantics inspired by Rust such as static typing and a borrow checker, but with syntax based on Python (like Nim, Julia). It was originally intended to be a superset of Python, but this goal has been either abandoned or postponed indefinitely as of March 2026. In May 2026, Modular launched a website for the language and in August 2026 Modular released Mojo 1.0, declaring it free and open-source software.\nMojo builds on the Multi-Level Intermediate Representation (MLIR) compiler software framework, instead of directly on the lower level LLVM compiler framework used by languages like Julia, Swift, C++, and Rust."
+   },
+   {
+    "pageid": 81118035,
+    "ns": 0,
+    "title": "Outline of the Python programming language",
+    "index": 2,
+    "extract": "The following outline is provided as an overview of and topical guide to Python:\nPython is a general-purpose, interpreted, object-oriented, functional, multi-paradigm, and dynamically typed programming language known for its emphasis on code readability\nand broad standard library. Python was created by Guido van Rossum and first released in 1991. It emphasizes code readability and developer productivity."
+   }
+  ]
+ },
+ "limits": {
+  "extracts": 20
+ }
+}

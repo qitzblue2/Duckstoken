@@ -59,6 +59,26 @@ TOOLS: dict[str, dict] = {
         "setting": "tool_fetch_url", "confirm": "confirm_fetch",
         "description": "Download a web page or text resource over http(s) and return it as text.",
         "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
+    "memory_save": {
+        "group": "learn", "setting": "tool_memory", "confirm": "confirm_memory_save",
+        "description": ("Save a durable fact or preference about the user or their projects to long-term memory, "
+                        "so it is remembered in future chats. Only save things the user said or clearly implied."),
+        "parameters": {"type": "object", "properties": {
+            "text": {"type": "string", "description": "One short, self-contained sentence"},
+            "kind": {"type": "string", "enum": ["fact", "preference", "project", "note"]}},
+            "required": ["text"]}},
+    "memory_search": {
+        "group": "learn", "setting": "tool_memory", "confirm": None,
+        "description": "Search long-term memory for things you were told earlier about the user or their projects.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    "web_search": {
+        "group": "web", "setting": "web_grounding", "confirm": "confirm_web",
+        "description": "Search the web for current information. Returns titles, URLs and snippets.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    "web_read": {
+        "group": "web", "setting": "web_grounding", "confirm": "confirm_web",
+        "description": "Open a public web page and return its readable text (use after web_search to read a result).",
+        "parameters": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
 }
 
 
@@ -78,17 +98,25 @@ def _inside(child: str, parent: str) -> bool:
 
 
 class ToolRunner:
-    def __init__(self, get_settings: Callable[[], dict]):
+    def __init__(self, get_settings: Callable[[], dict], memory=None, web=None):
         self.get = get_settings
+        self.memory, self.web = memory, web
+
+    def _enabled(self, spec: dict, s: dict) -> bool:
+        """PC tools need the master switch; memory and web tools have their own switches."""
+        group = spec.get("group", "pc")
+        if group == "learn":
+            return bool(self.memory is not None and s["memory_enabled"] and s[spec["setting"]])
+        if group == "web":
+            return bool(self.web is not None and s["web_grounding"] != "off")
+        return bool(s["tools_enabled"] and s[spec["setting"]])
 
     # ---------------------------------------------------------------- schema
     def definitions(self) -> list[dict]:
         s = self.get()
-        if not s["tools_enabled"]:
-            return []
         return [{"type": "function", "function": {"name": n, "description": t["description"],
                                                   "parameters": t["parameters"]}}
-                for n, t in TOOLS.items() if s[t["setting"]]]
+                for n, t in TOOLS.items() if self._enabled(t, s)]
 
     # ---------------------------------------------------------------- policy
     def check_path(self, raw: str, write: bool = False) -> str:
@@ -113,15 +141,19 @@ class ToolRunner:
         if name == "write_file":
             mode = "Append to" if args.get("append") else "Write"
             return f"{mode} file: {args.get('path')}\n({len(str(args.get('content', '')))} characters)"
-        if name == "fetch_url":
+        if name in ("fetch_url", "web_read"):
             return f"Fetch: {args.get('url')}"
+        if name == "web_search":
+            return f"Search the web for: {args.get('query')}"
+        if name == "memory_save":
+            return f"Remember: {args.get('text')}"
         key = args.get("path") or args.get("root") or ""
         return f"{name.replace('_', ' ').capitalize()}: {key}"
 
     def validate_call(self, name: str) -> dict:
         s = self.get()
         spec = TOOLS.get(name)
-        if not spec or not s["tools_enabled"] or not s[spec["setting"]]:
+        if not spec or not self._enabled(spec, s):
             raise ToolError(f"Tool '{name}' is not enabled")
         return spec
 
@@ -257,3 +289,34 @@ class ToolRunner:
         with urllib.request.urlopen(req, timeout=20) as r:
             data = r.read(self.get()["max_read_bytes"])
         return data.decode("utf-8", "replace")
+
+    # ----------------------------------------------------- memory & web tools
+    def _t_memory_save(self, a: dict):
+        try:
+            item = self.memory.add(str(a.get("text", "")), kind=a.get("kind") or "fact", source="model")
+        except ValueError as e:
+            raise ToolError(str(e)) from e
+        return f"Saved to memory (#{item['id']}): {item['text']}"
+
+    def _t_memory_search(self, a: dict):
+        hits = self.memory.search(str(a.get("query", "")), k=6)
+        return "\n".join(f"- {h['text']}" for h in hits) or "Nothing relevant in memory."
+
+    def _t_web_search(self, a: dict):
+        try:
+            res = self.web.search(str(a.get("query", "")), self.get())
+        except self.web.WebError as e:
+            raise ToolError(str(e)) from e
+        if not res:
+            return "No results."
+        return "\n\n".join(f"[{i}] {r['title']}\n{r['url']}\n{r['snippet']}" for i, r in enumerate(res, 1))
+
+    def _t_web_read(self, a: dict):
+        s = self.get()
+        try:
+            page = self.web.fetch_page(str(a.get("url", "")), s)
+        except self.web.WebError as e:
+            raise ToolError(str(e)) from e
+        if s["web_save_to_memory"] and self.memory is not None and s["memory_enabled"] and page["text"]:
+            self.memory.add(page["text"][:600], kind="web", source="web", url=page["url"], title=page["title"])
+        return f"{page['title']}\n{page['url']}\n\n{page['text']}" + ("\n...[page truncated]" if page["truncated"] else "")

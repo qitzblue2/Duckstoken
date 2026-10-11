@@ -17,6 +17,26 @@ starts the model server, and gives you a chat UI — with optional, heavily-guar
 | **Chat UI** | Streaming, gpt-oss reasoning view, tokens/s readout, tool calling, chat history, export |
 | **PC access (opt-in)** | List/read/find/write files, run PowerShell commands, fetch URLs, system info — per-tool switches, folder allow-list or *Full PC access*, approval prompts, protected folders, audit log |
 
+## Learning: make the AI better for *you*
+
+A **Learning** tab collects everything that can make a local model more useful over time. Weights never change on your PC —
+Duckstoken improves the *context* the model sees and gathers *training data* you can use for a real fine-tune.
+
+| Feature | What it does |
+|---|---|
+| **Long-term memory** | Facts/preferences (typed, `remember that…`, suggested after a chat, or saved by the AI with your OK) are searched (SQLite FTS5) and the relevant ones are added to every question. Teach it documents or web pages too. |
+| **Feedback loop** | 👍 / 👎 / ✏️ on any answer. Liked and corrected answers are shown to the model as examples for similar questions; 👎 notes become reminders. |
+| **Web research** | Optional. DuckDuckGo / Wikipedia / SearXNG / Brave. The AI can call `web_search` / `web_read`, or Duckstoken can search before answering fresh-fact questions and show the sources. SSRF-protected. |
+| **Refine 🔁** | Critique-and-rewrite passes with the same model. |
+| **Smart prompt** | A short built-in system prompt tuned for small models. |
+| **Big-model queue 🐘** | Send a question to your 120B to answer in the background (manual, immediate, or overnight window). It swaps with the everyday model if RAM can't hold both, and can "teacher-review" your recent answers while you sleep. |
+| **Training-data sandbox 🎓** | Liked / corrected / big-model answers become reviewable SFT and preference examples. Approve, edit, redact, then export a zip with a LoRA training script for a rented GPU. Load the resulting adapter via *Settings → LoRA adapter*. |
+
+**Honest expectations:** this makes a small model noticeably better at *your* tasks, style and facts — and fresher via web
+search — but it will not turn a 20B model into a 120B in general. Model size still sets the ceiling.
+Everything is stored locally in `%APPDATA%\Duckstoken\learning.db`; nothing leaves your PC unless you turn on web research
+(queries go to the chosen provider) or export and upload training data yourself.
+
 ## Quick start (Windows 10/11)
 
 1. Download [`Duckstoken.exe`](https://github.com/qitzblue2/Duckstoken/raw/main/Duckstoken.exe) (also on the [Releases](../../releases) page) and double-click it. (SmartScreen may warn: it's an unsigned open-source app → *More info → Run anyway*.)

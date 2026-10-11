@@ -1,11 +1,12 @@
 'use strict';
-const pages = { dashboard: Dashboard, chat: Chat, models: Models, settings: Settings, pc: PCAccess };
+const pages = { dashboard: Dashboard, chat: Chat, models: Models, settings: Settings, learning: Learning, pc: PCAccess };
 let current = 'dashboard';
 
 function go(name) {
   current = name;
   document.querySelectorAll('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.page === name));
   document.querySelectorAll('.page').forEach((p) => p.classList.toggle('active', p.id === 'page-' + name));
+  Object.entries(pages).forEach(([n, p]) => { if (n !== name) p.hide?.(); });
   pages[name]?.show?.();
 }
 
@@ -52,7 +53,7 @@ async function boot() {
   S.schema = sch.schema; S.groups = sch.groups; S.presets = sch.presets; S.hfQuick = sch.hf_quick;
   const d = await api('settings'); S.values = d.values; S.profiles = d.profiles;
   document.documentElement.dataset.theme = S.values.theme;
-  Dashboard.init(); Chat.init(); Models.init(); Settings.init(); PCAccess.init(); helpPage();
+  Dashboard.init(); Chat.init(); Models.init(); Settings.init(); Learning.init(); PCAccess.init(); helpPage();
   document.querySelectorAll('#nav button').forEach((b) => b.addEventListener('click', () => go(b.dataset.page)));
   $('#quit-btn').addEventListener('click', async () => {
     if (await confirmBox('Quit Duckstoken?', 'This also stops the model server.')) { await api('app/quit', {}).catch(() => {}); document.body.innerHTML = '<p style="padding:40px;font:16px sans-serif">Duckstoken has stopped. You can close this tab.</p>'; }
