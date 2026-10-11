@@ -1,5 +1,6 @@
 import gzip
 import html.parser
+import ipaddress
 import json
 import os
 import socket
@@ -11,6 +12,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib.parse import unquote_plus
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -38,12 +40,16 @@ def reply(body, ctype="text/html", status=200, charset="utf-8", url="https://exa
 
 
 def dns(mapping):
-    """A getaddrinfo replacement answering from `mapping` {host: [ip, ...]}; unknown hosts do not exist."""
+    """A getaddrinfo replacement answering from `mapping` {host: [ip, ...]}; IP literals resolve to themselves."""
     def fake(host, port, *args, **kwargs):
-        if host not in mapping:
-            raise socket.gaierror(-2, "Name or service not known")
-        return [(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))
-                for ip in mapping[host]]
+        try:
+            ipaddress.ip_address(host)
+            ips = [host]
+        except ValueError:
+            if host not in mapping:
+                raise socket.gaierror(-2, "Name or service not known") from None
+            ips = mapping[host]
+        return [(socket.AF_INET6 if ":" in ip else socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in ips]
     return fake
 
 
@@ -174,7 +180,7 @@ class HtmlToTextTests(unittest.TestCase):
 
     def test_whitespace_and_blank_lines_are_collapsed(self):
         _, text = websearch.html_to_text("<p>a</p>\n\n\n<p>   </p><p>b</p><div>c</div><div>d</div>")
-        self.assertEqual(text, "a\n\nb\nc\nd")
+        self.assertEqual(text, "a\n\nb\n\nc\nd")
 
 
 # ----------------------------------------------------------------------------------------- is_public_url / SSRF
@@ -403,11 +409,10 @@ class FetchPageTests(unittest.TestCase):
 
 
 class FetchPageRedirectSsrfTests(unittest.TestCase):
-    """The first hop looks public (DNS is faked and the connection is steered to the local server), the redirects are not."""
+    """The first hop looks public (DNS is faked and the TCP connection is steered to the local server), the redirects are not."""
 
     @classmethod
     def setUpClass(cls):
-        port = []
         cls.secret_hits = []
         cls.site = Site({
             "/ok": html_route("<title>public</title><p>fine</p>"),
@@ -424,7 +429,6 @@ class FetchPageRedirectSsrfTests(unittest.TestCase):
             "/to-other-public": (302, {"Location": "http://other.test/ok"}, b""),
             "/two-hops": (302, {"Location": "/to-loopback"}, b""),
         })
-        del port
 
     @classmethod
     def tearDownClass(cls):
@@ -434,17 +438,21 @@ class FetchPageRedirectSsrfTests(unittest.TestCase):
         self.secret_hits.clear()
         self.connected = []
         self.lookups = []
+        self.refuse = set()
         names = dns({"public.test": [PUBLIC_IP], "other.test": ["93.184.216.35"], "localhost": ["127.0.0.1"]})
+        real_connect = socket.create_connection
 
         def resolver(host, *args, **kwargs):
             self.lookups.append(host)
             return names(host, *args, **kwargs)
 
-        def connect(addrs, port, timeout):
-            self.connected.append(list(addrs))
-            return socket.create_connection(("127.0.0.1", self.site.port), timeout)
+        def connect(address, timeout=None, *args, **kwargs):
+            self.connected.append(address)
+            if address[0] in self.refuse:
+                raise OSError("unreachable")
+            return real_connect(("127.0.0.1", self.site.port), timeout)
 
-        for patcher in (mock.patch.object(socket, "getaddrinfo", resolver), mock.patch.object(websearch, "_connect", connect)):
+        for patcher in (mock.patch.object(socket, "getaddrinfo", resolver), mock.patch.object(socket, "create_connection", connect)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -453,8 +461,8 @@ class FetchPageRedirectSsrfTests(unittest.TestCase):
 
     def test_public_page_works_and_connects_to_the_validated_address(self):
         page = self.fetch("/ok")
-        self.assertEqual(page["title"], "public")
-        self.assertEqual(self.connected, [[PUBLIC_IP]])
+        self.assertEqual((page["title"], page["text"]), ("public", "fine"))
+        self.assertEqual(self.connected, [(PUBLIC_IP, 80)])
 
     def test_redirects_to_private_targets_are_blocked(self):
         for path in ["/to-loopback", "/to-decimal", "/to-v6", "/to-name", "/to-meta", "/to-lan", "/to-file",
@@ -464,33 +472,35 @@ class FetchPageRedirectSsrfTests(unittest.TestCase):
                 with self.assertRaises(WebError):
                     self.fetch(path)
                 self.assertEqual(self.secret_hits, [])
-                self.assertEqual(len(self.connected), 1 + (path == "/two-hops"), "no connection to the blocked hop")
+                self.assertEqual(len(self.connected), 2 if path == "/two-hops" else 1, "never connected to the blocked hop")
 
     def test_relative_and_public_redirects_are_followed(self):
         self.assertEqual(self.fetch("/to-relative")["url"], "http://public.test/ok")
+        self.connected.clear()
         page = self.fetch("/to-other-public")
-        self.assertEqual(page["url"], "http://other.test/ok")
-        self.assertEqual(self.connected, [[PUBLIC_IP], ["93.184.216.35"], [PUBLIC_IP], ["93.184.216.35"]][:2] + [
-            [PUBLIC_IP], ["93.184.216.35"]][:0] or self.connected)
+        self.assertEqual((page["url"], page["title"]), ("http://other.test/ok", "public"))
+        self.assertEqual(self.connected, [(PUBLIC_IP, 80), ("93.184.216.35", 80)])
 
     def test_the_host_is_resolved_once_per_hop_and_never_again_at_connect_time(self):
         self.fetch("/ok")
-        self.assertEqual(self.lookups, ["public.test"])
+        self.assertEqual(self.lookups.count("public.test"), 1)
+        self.assertNotIn(PUBLIC_IP, self.lookups)
 
     def test_dns_rebinding_cannot_change_the_connection_target(self):
-        answers = iter([[PUBLIC_IP], ["127.0.0.1"], ["127.0.0.1"]])
+        answers = iter([PUBLIC_IP, "127.0.0.1", "127.0.0.1"])
 
         def rebinding(host, port, *args, **kwargs):
-            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (next(answers)[0], port))]
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (next(answers), port))]
 
         with mock.patch.object(socket, "getaddrinfo", rebinding):
             self.fetch("/ok")
-        self.assertEqual(self.connected, [[PUBLIC_IP]])
+        self.assertEqual(self.connected, [(PUBLIC_IP, 80)])
 
     def test_every_resolved_address_is_tried_in_order(self):
+        self.refuse.add(PUBLIC_IP)
         with mock.patch.object(socket, "getaddrinfo", dns({"public.test": [PUBLIC_IP, "2606:4700:4700::1111"]})):
             self.fetch("/ok")
-        self.assertEqual(self.connected, [[PUBLIC_IP, "2606:4700:4700::1111"]])
+        self.assertEqual(self.connected, [(PUBLIC_IP, 80), ("2606:4700:4700::1111", 80)])
 
 
 class ConnectionTests(unittest.TestCase):
@@ -562,18 +572,18 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(truncated)
 
     def test_secret_headers_are_not_forwarded_to_another_host(self):
-        seen = []
         site = Site({"/hop": (302, {"Location": "http://b.test/final"}, b""),
-                     "/final": lambda s: (seen.append(s.hits[-1][1]), html_route("{}", "application/json"))[1]})
+                     "/final": html_route("{}", "application/json")})
         self.addCleanup(site.close)
+        get = dict(timeout=3, allow_private=False, accept="application/json", types=("application/json",),
+                   secret_headers={"X-Subscription-Token": "k"})
         with mock.patch.object(socket, "getaddrinfo", dns({"a.test": [PUBLIC_IP], "b.test": ["93.184.216.35"]})), \
-                mock.patch.object(websearch, "_connect", lambda a, p, t: socket.create_connection(("127.0.0.1", site.port), t)):
-            websearch._get("http://a.test/hop", timeout=3, allow_private=False, accept="application/json",
-                           types=("application/json",), secret_headers={"X-Subscription-Token": "k"})
+                mock.patch.object(websearch, "_connect", lambda addrs, port, timeout: socket.create_connection(
+                    ("127.0.0.1", site.port), timeout)):
+            websearch._get("http://a.test/hop", **get)
             self.assertEqual([h.get("x-subscription-token") for _, h in site.hits], ["k", None])
             site.hits.clear()
-            websearch._get("http://a.test/final", timeout=3, allow_private=False, accept="application/json",
-                           types=("application/json",), secret_headers={"X-Subscription-Token": "k"})
+            websearch._get("http://a.test/final", **get)
             self.assertEqual(site.hits[0][1]["x-subscription-token"], "k")
 
 
@@ -765,7 +775,7 @@ class SearchTests(unittest.TestCase):
         with self.assertRaisesRegex(WebError, "SearXNG"):
             self.run_search("duck", dict(CFG, web_provider="searxng", searxng_url="  "), reply("{}"))
 
-    def test_searxng_may_be_on_the_home_network_but_its_redirects_are_checked_like_any_other(self):
+    def test_searxng_may_live_on_the_home_network(self):
         results, calls = self.run_search("duck", dict(CFG, web_provider="searxng", searxng_url="http://192.168.1.20:8080"),
                                          reply(fixture("ws_searxng.json"), "application/json"))
         self.assertTrue(calls[0][1]["allow_private"])
@@ -781,9 +791,9 @@ class SearchTests(unittest.TestCase):
 
     def test_query_is_cleaned_and_bounded(self):
         _, calls = self.run_search("a\x00b\nc " + "x" * 2000, CFG, reply(""))
-        query = calls[0][0].split("q=")[1]
-        self.assertLessEqual(len(websearch.urllib_parse_unquote(query)) if hasattr(websearch, "urllib_parse_unquote") else 0, 400)
-        self.assertNotIn("%00", query)
+        query = unquote_plus(calls[0][0].split("q=")[1])
+        self.assertEqual(query, "a b c " + "x" * 393 + "…")
+        self.assertEqual(len(query), websearch.MAX_QUERY)
 
     def test_provider_failures_are_not_swallowed(self):
         with mock.patch.object(websearch, "_get", side_effect=WebError("html.duckduckgo.com did not answer in time")):
@@ -860,14 +870,20 @@ def result(i, snippet="snippet"):
     return {"title": f"Title {i}", "url": f"https://site{i}.test/page", "snippet": f"{snippet} {i}"}
 
 
-class GroundTests(unittest.TestCase):
+class GroundCase(unittest.TestCase):
+    """Fixtures for the ground() tests: search and fetch_page are replaced for the whole test."""
+
     def setUp(self):
         websearch.clear_cache()
         self.addCleanup(websearch.clear_cache)
         self.searches = []
         self.fetches = []
         self.results = [result(i) for i in range(1, 6)]
-        self.pages = {r["url"]: f"Page text about {r['title']}.\n\n\nSecond   paragraph." for r in self.results}
+        self.pages = {r["url"]: f"Page text about {r['title']}.\n\n\nSecond paragraph." for r in self.results}
+        for name, fake in (("search", self.fake_search), ("fetch_page", self.fake_fetch)):
+            patcher = mock.patch.object(websearch, name, fake)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def fake_search(self, query, cfg):
         self.searches.append(query)
@@ -880,9 +896,10 @@ class GroundTests(unittest.TestCase):
         return {"url": url, "title": "t", "text": self.pages[url], "truncated": False}
 
     def ground(self, query="python 3.14 release date", cfg=None):
-        with mock.patch.object(websearch, "search", self.fake_search), mock.patch.object(websearch, "fetch_page", self.fake_fetch):
-            return websearch.ground(query, dict(CFG, **(cfg or {})))
+        return websearch.ground(query, dict(CFG, **(cfg or {})))
 
+
+class GroundTests(GroundCase):
     def test_builds_a_cited_block(self):
         g = self.ground()
         lines = g["text"].split("\n")
@@ -920,8 +937,8 @@ class GroundTests(unittest.TestCase):
             barrier.wait()
             return {"url": url, "title": "", "text": "ok", "truncated": False}
 
-        with mock.patch.object(websearch, "search", self.fake_search), mock.patch.object(websearch, "fetch_page", meeting_fetch):
-            g = websearch.ground("parallel fetching", dict(CFG))
+        with mock.patch.object(websearch, "fetch_page", meeting_fetch):
+            g = self.ground("parallel fetching")
         self.assertIn("[2] Title 2 — https://site2.test/page\nok", g["text"])
 
     def test_hard_character_budget(self):
@@ -982,26 +999,19 @@ class GroundTests(unittest.TestCase):
         self.assertIn("nothing that could be used", g["error"])
 
     def test_page_reading_crash_is_contained(self):
-        with mock.patch.object(websearch, "search", self.fake_search), mock.patch.object(websearch, "fetch_page", side_effect=KeyError("x")):
-            g = websearch.ground("some query", dict(CFG))
+        with mock.patch.object(websearch, "fetch_page", side_effect=KeyError("x")):
+            g = self.ground("some query")
         self.assertEqual(g["text"], "")
         self.assertIn("KeyError", g["error"])
 
 
-class GroundCacheTests(GroundTests):
-    """Same fixtures as GroundTests; only the cache behaviour is exercised here."""
-
+class GroundCacheTests(GroundCase):
     def setUp(self):
         super().setUp()
         self.now = [1_000_000.0]
         patcher = mock.patch.object(time, "time", lambda: self.now[0])
         patcher.start()
         self.addCleanup(patcher.stop)
-
-    def run(self, result=None):  # the inherited tests are already covered above
-        if self._testMethodName in GroundTests.__dict__ and not self._testMethodName.startswith("test_cache"):
-            return None
-        return super().run(result)
 
     def test_cache_hit_within_ttl_and_expiry_after(self):
         first = self.ground()

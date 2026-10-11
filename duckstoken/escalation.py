@@ -196,7 +196,7 @@ class QueueStore:
 
 # -------------------------------------------------------------------------------------------- night window
 def _parse_hhmm(value) -> datetime.time | None:
-    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value) if isinstance(value, str) else None
+    m = re.fullmatch(r"\s*([0-9]{1,2}):([0-9]{2})\s*", value) if isinstance(value, str) else None
     if not m or int(m[1]) > 23 or int(m[2]) > 59:
         return None
     return datetime.time(int(m[1]), int(m[2]))

@@ -518,12 +518,17 @@ def parse_duckduckgo(html: str) -> list[dict]:
     return _unique(parser.results)
 
 
+def _objects(value) -> list[dict]:
+    """The dict items of a JSON list; anything else (including a missing list) gives nothing."""
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
 def parse_wikipedia(data) -> list[dict]:
     """Results of an en.wikipedia.org `generator=search&prop=extracts` query (formatversion=2)."""
-    pages = (data.get("query") or {}).get("pages") if isinstance(data, dict) else None
-    if isinstance(pages, dict):
-        pages = list(pages.values())
-    pages = [p for p in pages or [] if isinstance(p, dict) and isinstance(p.get("title"), str) and p["title"]]
+    query = data.get("query") if isinstance(data, dict) else None
+    pages = query.get("pages") if isinstance(query, dict) else None
+    pages = _objects(list(pages.values()) if isinstance(pages, dict) else pages)
+    pages = [p for p in pages if isinstance(p.get("title"), str) and p["title"]]
     pages.sort(key=lambda p: p["index"] if isinstance(p.get("index"), int) else 10 ** 6)
     return _unique([_result(_squash(p["title"], 200),
                             "https://en.wikipedia.org/wiki/" + quote(p["title"].replace(" ", "_"), safe="()_,'!*~:;"),
@@ -531,20 +536,20 @@ def parse_wikipedia(data) -> list[dict]:
 
 
 def parse_searxng(data) -> list[dict]:
-    items = data.get("results") if isinstance(data, dict) else None
+    items = _objects(data.get("results") if isinstance(data, dict) else None)
     return _unique([_result(_strip_markup(r.get("title"), 200), r.get("url"), _strip_markup(r.get("content"), 500))
-                    for r in items or [] if isinstance(r, dict)])
+                    for r in items])
 
 
 def parse_brave(data) -> list[dict]:
     web = data.get("web") if isinstance(data, dict) else None
-    items = web.get("results") if isinstance(web, dict) else None
+    items = _objects(web.get("results") if isinstance(web, dict) else None)
     return _unique([_result(_strip_markup(r.get("title"), 200), r.get("url"), _strip_markup(r.get("description"), 500))
-                    for r in items or [] if isinstance(r, dict)])
+                    for r in items])
 
 
 def _clean_query(query) -> str:
-    q = _squash(re.sub(r"[\x00-\x1f\x7f]", " ", str(query or "")), MAX_QUERY)
+    q = _squash(re.sub(r"[\x00-\x1f\x7f]", " ", str(query or "")[:10 * MAX_QUERY]), MAX_QUERY)
     if not q:
         raise WebError("There is nothing to search for")
     return q
@@ -640,8 +645,7 @@ _CODE_OR_TASK = re.compile(
     r".*(\b(this|these|following|below|above|text|paragraph|email|sentence|essay|passage)\b|[:\"'\n])"
     r"|\bfix (the |my )?(grammar|spelling)", re.I | re.S)
 _MATH = re.compile(r"\d\s*[+*^×÷]\s*\d|\d\s+([-x/]|plus|minus|times|divided by|multiplied by)\s+\d|\d\s*%\s*of\s*\d|"
-                   r"\b(square root|sqrt|derivative|integral|"
-                   r"factorial|solve for|equation|calculate|compute)\b", re.I)
+                   r"\b(square root|sqrt|derivative|integral|factorial|solve for|equation|calculate|compute)\b", re.I)
 _PERSONAL = re.compile(r"\b(my|our|your) (latest|newest|most recent|current|recent)\b", re.I)
 _FRESH = re.compile(r"\b(latest|newest|most recent|recent (news|releases?|versions?|updates?|events?|developments?)|"
                     r"breaking|headlines?|news|trending|up[- ]to[- ]date|release (date|notes)|changelog|prices?|"
@@ -666,7 +670,7 @@ def needs_web(query: str) -> bool:
         return False
     if _ONLINE.search(q) or _URL.search(q):
         return True
-    if _CODE_OR_TASK.search(q) or _MATH.search(q) or _CHITCHAT.match(q) and len(words) <= 4:
+    if _CODE_OR_TASK.search(q) or _MATH.search(q) or (_CHITCHAT.match(q) and len(words) <= 4):
         return False
     q = _PERSONAL.sub(" ", q)
     if _FRESH.search(q) or _LOOK_UP.search(q):
