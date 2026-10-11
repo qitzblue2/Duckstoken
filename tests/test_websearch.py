@@ -390,7 +390,8 @@ class FetchPageTests(unittest.TestCase):
         dead.bind(("127.0.0.1", 0))
         port = dead.getsockname()[1]
         dead.close()
-        with self.assertRaisesRegex(WebError, "Could not get a response"):
+        # Linux refuses at once; Windows keeps retrying a closed port and reports a timeout instead.
+        with self.assertRaisesRegex(WebError, "Could not get a response|did not answer in time"):
             websearch.fetch_page(f"http://127.0.0.1:{port}/", self.cfg)
 
     def test_private_addresses_are_refused_by_default(self):
