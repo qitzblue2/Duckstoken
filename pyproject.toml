@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duckstoken"
+version = "0.1.0"
+description = "Run big local LLMs (gpt-oss-120b and friends) on modest PCs, with auto-tuning, a chat UI and optional PC-access tools."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+duckstoken = "duckstoken.__main__:main"
+
+[tool.setuptools]
+packages = ["duckstoken"]
+
+[tool.setuptools.package-data]
+duckstoken = ["web/*"]

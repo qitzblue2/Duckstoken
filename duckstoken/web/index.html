@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="duck-token" content="__TOKEN__">
+<title>Duckstoken</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A6%86%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">🦆</span> Duckstoken <small>v__VERSION__</small></div>
+  <nav id="nav">
+    <button data-page="dashboard" class="active">Dashboard</button>
+    <button data-page="chat">Chat</button>
+    <button data-page="models">Models</button>
+    <button data-page="settings">Settings</button>
+    <button data-page="pc">PC access</button>
+    <button data-page="about">Help</button>
+  </nav>
+  <div class="top-right">
+    <span id="top-state" class="badge">stopped</span>
+    <button id="quit-btn" class="ghost" title="Quit Duckstoken">Quit</button>
+  </div>
+</header>
+
+<main>
+  <section id="page-dashboard" class="page active"></section>
+  <section id="page-chat" class="page"></section>
+  <section id="page-models" class="page"></section>
+  <section id="page-settings" class="page"></section>
+  <section id="page-pc" class="page"></section>
+  <section id="page-about" class="page"></section>
+</main>
+
+<div id="modal-root"></div>
+<div id="toasts"></div>
+<script src="/static/core.js"></script>
+<script src="/static/dashboard.js"></script>
+<script src="/static/chat.js"></script>
+<script src="/static/models.js"></script>
+<script src="/static/settings.js"></script>
+<script src="/static/main.js"></script>
+</body>
+</html>

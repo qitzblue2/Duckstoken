@@ -1,0 +1,39 @@
+name: Build Windows exe
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: python -W ignore -m unittest discover -s tests
+      - name: Build
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m PyInstaller --noconfirm --clean --onefile --console --name Duckstoken --add-data "duckstoken/web;duckstoken/web" duckstoken_launcher.py
+      - name: Smoke test the exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath dist\Duckstoken.exe -ArgumentList "--no-browser","--port","18999","--data-dir","$env:RUNNER_TEMP\duck" -PassThru
+          Start-Sleep -Seconds 8
+          $html = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18999/).Content
+          if ($html -notmatch "Duckstoken") { throw "UI did not load" }
+          Stop-Process -Id $p.Id -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Duckstoken-windows
+          path: dist/Duckstoken.exe
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Duckstoken.exe
+          generate_release_notes: true
