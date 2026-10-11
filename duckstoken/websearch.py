@@ -243,7 +243,9 @@ def _check_url(url: str, allow_private: bool) -> _Target:
         raise WebError(f"Could not find the server '{host}'")
     if not allow_private and not all(_is_global(ipaddress.ip_address(a)) for a in addrs):
         raise WebError(f"'{host}' is a private or local address; web tools only open public websites")
-    request = quote(parts.path or "/", safe=_PATH_SAFE) + (f"?{quote(parts.query, safe=_PATH_SAFE)}" if parts.query else "")
+    request = quote(parts.path or "/", safe=_PATH_SAFE)
+    if parts.query:
+        request += "?" + quote(parts.query, safe=_PATH_SAFE)
     return _Target(parts.scheme, host, port, request, addrs)
 
 
@@ -634,8 +636,8 @@ _ONLINE = re.compile(r"(^|[.!?]\s+)google\b|\bgoogle (it|this|that|for|me|up)\b"
                      r"|\b(search|look|find|check)\b.{0,20}\b(google|bing|duckduckgo|online|the web|the internet)\b"
                      r"|\b(on|from|via) the (web|internet)\b|\bweb search\b|\bbrowse the (web|internet)\b", re.I)
 _LOOK_UP = re.compile(r"\b(search for|look(ing)? (it |this |that |them )?up)\b"
-                      r"(?!\s+(a |an |the |my |some )?(files?|folders?|text|strings?|words?|substrings?|patterns?|keys?|"
-                      r"values?|elements?|items?|rows?|records?|characters?|lines?|entr(y|ies))\b)", re.I)
+                      r"(?!\s+(a |an |the |my |some )?(files?|folders?|text|strings?|words?|substrings?|patterns?|"
+                      r"keys?|values?|elements?|items?|rows?|records?|characters?|lines?|entr(y|ies))\b)", re.I)
 _CODE_OR_TASK = re.compile(
     r"```"
     r"|\b(write|create|implement|generate|refactor|debug|fix|build|code|convert|port)\b.{0,40}"
@@ -657,9 +659,10 @@ _TIME = re.compile(r"\b(right now|tonight|today's|as of today|this (week|weekend
 _FACT_LOOKUP = re.compile(r"\b(who is|who's|who was|who are|what is the|what's the|when did|when does|when is|"
                           r"when was|where is|how much (is|does|do|are)|how many|versions?|releases?|released)\b", re.I)
 _ASKING = re.compile(r"^(who|what|when|where|which|how|is|are|does|did|has|have|will|can|could|do)\b|\?\s*$", re.I)
-_NOT_A_LOOKUP = re.compile(r"\b(difference between|meaning of|means?|define|definition|explain|why|how (do|does|to|can)|"
-                           r"in (python|javascript|java|c\+\+|c#|rust|go|sql|bash|html|css)|code|function|algorithm|"
-                           r"syntax|formula|theorem|proof|my|(do|am|should|can|could|would) i)\b", re.I)
+_NOT_A_LOOKUP = re.compile(r"\b(difference between|meaning of|means?|define|definition|explain|why|"
+                           r"how (do|does|to|can)|in (python|javascript|java|c\+\+|c#|rust|go|sql|bash|html|css)|"
+                           r"code|function|algorithm|syntax|formula|theorem|proof|my|"
+                           r"(do|am|should|can|could|would) i)\b", re.I)
 
 
 def needs_web(query: str) -> bool:

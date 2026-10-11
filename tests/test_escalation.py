@@ -1123,6 +1123,27 @@ class ThreadTests(WorkerCase):
         self.assertEqual(self.small.starts, 0)  # shutting down: the everyday model is not brought back
         self.assertFalse(self.worker.status()["small_was_stopped"])
 
+    def test_stopping_after_the_window_closed_does_not_bring_the_everyday_model_back(self):
+        entered, released = threading.Event(), threading.Event()
+        self.big.on_stop = released.set
+
+        def window_closes_then_block():
+            self.world.now = datetime.datetime(2025, 1, 6, 8, 0)
+            entered.set()
+            released.wait(10)
+            raise llm.LLMError("connection reset")
+
+        self.settings["big_run_mode"] = "overnight"
+        self.world.now = datetime.datetime(2025, 1, 6, 3, 0)
+        self.world.inside = window_closes_then_block
+        self.job()
+        self.worker.start()
+        self.worker.wake()
+        self.assertTrue(entered.wait(10))
+        self.worker.stop()
+        self.assertEqual((self.small.starts, self.small.state), (0, "stopped"))
+        self.assertEqual(self.queue.counts()["queued"], 1)
+
     def test_the_loop_survives_errors(self):
         calls = []
         original = self.worker.maybe_nightly_review

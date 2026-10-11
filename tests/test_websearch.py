@@ -145,10 +145,11 @@ class HtmlToTextTests(unittest.TestCase):
         self.assertNotIn("Email", text)
 
     def test_messy_markup_does_not_raise(self):
-        samples = ["", "plain text only", "<p>unclosed <b>bold <i>italic", "</div></div></p>text", "<![if IE]>x<![endif]>",
-                   "<![foo[ bar", "<!-- unclosed comment", "<a href='x", "<p class='a>b'>quoted > gt</p>",
-                   "<SCRIPT>alert(1)</SCRIPT><P>UPPER</P>", "<![CDATA[ data ]]>", "<?php echo 1 ?>text", "<<<>>>", "&#xZZ; &bogus;",
-                   "<nav>never closed <p>swallowed", "\x00\x01<p>ctrl</p>"]
+        samples = ["", "plain text only", "<p>unclosed <b>bold <i>italic", "</div></div></p>text",
+                   "<![if IE]>x<![endif]>", "<![foo[ bar", "<!-- unclosed comment", "<a href='x",
+                   "<p class='a>b'>quoted > gt</p>", "<SCRIPT>alert(1)</SCRIPT><P>UPPER</P>", "<![CDATA[ data ]]>",
+                   "<?php echo 1 ?>text", "<<<>>>", "&#xZZ; &bogus;", "<nav>never closed <p>swallowed",
+                   "\x00\x01<p>ctrl</p>"]
         for sample in samples:
             with self.subTest(sample=sample):
                 title, text = websearch.html_to_text(sample)
@@ -409,7 +410,7 @@ class FetchPageTests(unittest.TestCase):
 
 
 class FetchPageRedirectSsrfTests(unittest.TestCase):
-    """The first hop looks public (DNS is faked and the TCP connection is steered to the local server), the redirects are not."""
+    """The first hop looks public (DNS is faked, the TCP connection goes to a local server); the redirects do not."""
 
     @classmethod
     def setUpClass(cls):
@@ -452,7 +453,8 @@ class FetchPageRedirectSsrfTests(unittest.TestCase):
                 raise OSError("unreachable")
             return real_connect(("127.0.0.1", self.site.port), timeout)
 
-        for patcher in (mock.patch.object(socket, "getaddrinfo", resolver), mock.patch.object(socket, "create_connection", connect)):
+        for name, fake in (("getaddrinfo", resolver), ("create_connection", connect)):
+            patcher = mock.patch.object(socket, name, fake)
             patcher.start()
             self.addCleanup(patcher.stop)
 
@@ -472,7 +474,7 @@ class FetchPageRedirectSsrfTests(unittest.TestCase):
                 with self.assertRaises(WebError):
                     self.fetch(path)
                 self.assertEqual(self.secret_hits, [])
-                self.assertEqual(len(self.connected), 2 if path == "/two-hops" else 1, "never connected to the blocked hop")
+                self.assertEqual(len(self.connected), 2 if path == "/two-hops" else 1, "connected to the blocked hop")
 
     def test_relative_and_public_redirects_are_followed(self):
         self.assertEqual(self.fetch("/to-relative")["url"], "http://public.test/ok")
@@ -617,8 +619,8 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(unwrap("//duckduckgo.com/l/?uddg=https%3A%2F%2Fa.test%2Fx%3Fy%3D1&rut=z"), "https://a.test/x?y=1")
         self.assertEqual(unwrap("/l/?uddg=https%3A%2F%2Fa.test%2F"), "https://a.test/")
         self.assertEqual(unwrap("https://a.test/direct"), "https://a.test/direct")
-        for bad in ("https://duckduckgo.com/y.js?ad_domain=x", "//duckduckgo.com/l/?rut=only", "https://links.duckduckgo.com/d.js",
-                    "", None, "http://[::1"):
+        for bad in ("https://duckduckgo.com/y.js?ad_domain=x", "//duckduckgo.com/l/?rut=only",
+                    "https://links.duckduckgo.com/d.js", "", None, "http://[::1"):
             self.assertEqual(unwrap(bad), "", bad)
 
     def test_duckduckgo_garbage_input(self):
@@ -668,7 +670,8 @@ class ParserTests(unittest.TestCase):
 
     def test_json_parsers_survive_garbage(self):
         for parse in (websearch.parse_searxng, websearch.parse_brave):
-            for bad in (None, [], {}, "x", 5, {"results": 5}, {"web": []}, {"web": {"results": "x"}}, {"results": [None, 1, []]}):
+            for bad in (None, [], {}, "x", 5, {"results": 5}, {"web": []}, {"web": {"results": "x"}},
+                        {"results": [None, 1, []]}):
                 with self.subTest(parse=parse.__name__, bad=bad):
                     self.assertEqual(parse(bad), [])
 
@@ -698,7 +701,8 @@ class SearchTests(unittest.TestCase):
             return websearch.search(query, cfg), calls
 
     def test_duckduckgo(self):
-        results, calls = self.run_search("python  release\tdate", dict(CFG, web_max_results=2), reply(fixture("ws_duckduckgo.html")))
+        results, calls = self.run_search("python  release\tdate", dict(CFG, web_max_results=2),
+                                         reply(fixture("ws_duckduckgo.html")))
         self.assertEqual(len(results), 2)
         url, kw = calls[0]
         self.assertEqual(url, "https://html.duckduckgo.com/html/?q=python+release+date")
@@ -909,7 +913,7 @@ class GroundTests(GroundCase):
         self.assertIn("untrusted", lines[1])
         self.assertIn("[1] Title 1 — https://site1.test/page\nPage text about Title 1.\nSecond paragraph.", g["text"])
         self.assertIn("[2] Title 2 — https://site2.test/page\nPage text about Title 2.", g["text"])
-        self.assertIn("[3] Title 3 — https://site3.test/page\nsnippet 3", g["text"], "pages beyond web_fetch_pages use the snippet")
+        self.assertIn("[3] Title 3 — https://site3.test/page\nsnippet 3", g["text"], "snippet beyond web_fetch_pages")
         self.assertEqual([s["url"] for s in g["sources"]], [r["url"] for r in self.results])
         self.assertEqual(g["sources"][0], {"title": "Title 1", "url": "https://site1.test/page", "snippet": "snippet 1"})
         self.assertNotIn("error", g)
@@ -946,8 +950,10 @@ class GroundTests(GroundCase):
         for i, r in enumerate(self.results):
             r["url"] += str(i)
         self.pages = {r["url"]: "word " * 5000 for r in self.results}
-        for cfg in ({}, {"web_max_results": 1, "web_fetch_pages": 0}, {"web_max_results": 10, "web_fetch_pages": 5, "web_page_chars": 30000},
-                    {"web_max_results": 3, "web_fetch_pages": 3, "web_page_chars": 300}, {"web_max_results": 2, "web_fetch_pages": 0}):
+        for cfg in ({}, {"web_max_results": 1, "web_fetch_pages": 0},
+                    {"web_max_results": 10, "web_fetch_pages": 5, "web_page_chars": 30000},
+                    {"web_max_results": 3, "web_fetch_pages": 3, "web_page_chars": 300},
+                    {"web_max_results": 2, "web_fetch_pages": 0}):
             with self.subTest(cfg=cfg):
                 websearch.clear_cache()
                 merged = dict(CFG, **cfg)

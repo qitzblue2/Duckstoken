@@ -543,7 +543,7 @@ class EscalationWorker:
         if not self._small_was_stopped:
             return
         self._small_was_stopped = False
-        if self._active(self.small_server):  # the user already started it again
+        if self._stop.is_set() or self._active(self.small_server):  # shutting down, or the user restarted it already
             return
         try:
             self.small_server.start(self.get_settings())
