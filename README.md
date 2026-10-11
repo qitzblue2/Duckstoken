@@ -37,14 +37,31 @@ search — but it will not turn a 20B model into a 120B in general. Model size s
 Everything is stored locally in `%APPDATA%\Duckstoken\learning.db`; nothing leaves your PC unless you turn on web research
 (queries go to the chosen provider) or export and upload training data yourself.
 
-## Quick start (Windows 10/11)
+## Install (Windows 10/11)
 
-1. Download [`Duckstoken.exe`](https://github.com/qitzblue2/Duckstoken/raw/main/Duckstoken.exe) (also on the [Releases](../../releases) page) and double-click it. (SmartScreen may warn: it's an unsigned open-source app → *More info → Run anyway*.)
-2. **Models → Engine → Find latest build → Install.**
-3. **Models → download** `gpt-oss-20b` (11 GB, fast) or `gpt-oss-120b` (59 GB, needs a fast SSD).
-4. **Dashboard → ⚡ Auto-tune → ▶ Start**, then open **Chat**.
+Download from the [Releases](../../releases) page — pick one:
 
-From source: `python -m duckstoken` (Python 3.10+, standard library only) or double-click `run_windows.bat`.
+* **`Duckstoken-Setup.exe`** — the installer. No admin rights needed; adds a Start-menu entry (optional desktop icon and
+  "start with Windows"), opens in its own window and keeps the model running from the system tray.
+* **`Duckstoken.exe`** — portable single file. Double-click it; nothing is installed.
+
+Both contain everything: a CPU build of the llama.cpp engine is **bundled**, so there is nothing else to download.
+(Windows SmartScreen may warn because the app is unsigned → *More info → Run anyway*.)
+Updates are checked from GitHub and verified against a published SHA-256 before they are applied.
+
+First run: **Models → download** `gpt-oss-20b` (11 GB, fast) or `gpt-oss-120b` (59 GB, needs a fast SSD) →
+**Dashboard → ⚡ Auto-tune → ▶ Start** → **Chat**.
+
+### Engines — you are not tied to llama.cpp
+
+| Engine | What it is | Use it when |
+|---|---|---|
+| **llama.cpp (bundled)** | The default. Fast native engine; the only one here that can run 59 GB models from RAM + SSD. Optional CUDA/Vulkan builds can be installed from the app. | Almost always |
+| **External server** | Talks to Ollama, LM Studio, vLLM or any OpenAI-compatible server you already run. | You already use one of those |
+| **Built-in (pure Python + NumPy)** | Duckstoken's own inference engine for small GGUF models (≈3B and below). No other program involved. | You want zero dependencies; small models only. It is far slower than llama.cpp and cannot run gpt-oss. |
+
+From source: `python -m duckstoken` (Python 3.10+; the standard library is enough, `numpy` enables the built-in engine,
+`pywebview` + `pystray` + `pillow` enable the native window and tray) or double-click `run_windows.bat`.
 
 ## Running `gpt-oss-120b` on 48 GB RAM, an i7-8700K and a GTX 750
 
@@ -76,12 +93,14 @@ Be aware: text the model reads (a web page, a document, a repo) can contain inst
 * Downloads are restricted to Hugging Face / GitHub hosts; archives are extracted with zip-slip protection.
 * If you change the model server's bind address, **set an API key**.
 
-## Build the exe yourself
+## Build it yourself
 
 ```bat
 build_windows.bat
 ```
-or push a tag (`git tag v0.1.0 && git push --tags`) and the GitHub Action builds, smoke-tests and publishes `Duckstoken.exe`.
+builds the portable exe (engine bundled). The GitHub Action (`release.yml`) additionally builds the Inno Setup installer,
+smoke-tests both (the installed app is launched and its UI fetched), writes `SHA256SUMS.txt`, and publishes: pushes to `main`
+update the rolling **Latest build** release; pushing a tag such as `v0.2.0` publishes a versioned release.
 
 ## Development
 
