@@ -49,3 +49,28 @@ def learning_db_file() -> Path:
 
 def big_server_log_file() -> Path:
     return data_dir() / "llama-server-big.log"
+
+
+def vgpu_store_dir() -> Path:
+    """Benchmarks, optimizer history and learned VirtualGPU profiles."""
+    p = data_dir() / "vgpu"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def staging_dir() -> Path:
+    """SSD staging cache for models that live on a slow drive (see vgpu/diskcache.py)."""
+    p = data_dir() / "staging"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def vgpu_dir() -> Path:
+    """VirtualGPU working files that are not benchmark records (performance log, probe cache)."""
+    p = data_dir() / "vgpu"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def perf_log_file() -> Path:
+    return vgpu_dir() / "perf.jsonl"
