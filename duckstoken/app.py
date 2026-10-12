@@ -18,9 +18,10 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, api_learning, api_system, bundle, context, downloads, gguf, hardware, paths, settings as st, tuner, updater, websearch
+from . import __version__, api_learning, api_system, api_vgpu, bundle, context, downloads, gguf, hardware, paths, settings as st, tuner, updater, websearch
 from .api_learning import LearningApi, post
 from .api_system import SystemApi, UpdateJob
+from .api_vgpu import VGpuApi
 from .dataset import DatasetStore
 from .db import Database
 from .engines import ENGINE_LABELS, EngineSwitch, load_engines
@@ -30,7 +31,9 @@ from .feedback import ExchangeStore
 from .memory import MemoryStore
 from .server_proc import ServerManager
 from .tools import TOOLS, ToolRunner
+from .vgpu.diskcache import BoundedCache
 from .vgpu.meter import RequestMeter
+from .vgpu.runtime import VGpuRuntime
 
 WEB = Path(__file__).parent / "web"
 HF_QUICK = [
@@ -57,12 +60,13 @@ class App:
         self.updater = updater.UpdateChecker(self.settings.all, paths.data_dir())
         self.update_job = UpdateJob()
         self.last_request: dict = {}  # speed of the latest chat reply (measured), shown on the Dashboard
-        self.vgpu = None  # set by vgpu_bind() once the memory manager is created
+        self.meta_cache = BoundedCache(max_bytes=4 << 20, max_items=64)  # parsed GGUF headers (bounded, with hit/miss stats)
+        self.vgpu = VGpuRuntime(self)
         api_learning.bind(self)
         api_system.bind(self)
+        api_vgpu.bind(self)
         self.token = secrets.token_urlsafe(24)
         self.httpd: ThreadingHTTPServer | None = None
-        self._gguf_cache: dict = {}
         self.port = 0
 
     # ----------------------------------------------------------- helpers
@@ -70,13 +74,15 @@ class App:
         p = Path(path)
         if not p.is_file():
             raise ApiError("Model file not found")
-        key = (str(p), p.stat().st_mtime)
-        if key not in self._gguf_cache:
+        key = f"{p}|{p.stat().st_mtime_ns}"
+        info = self.meta_cache.get(key)
+        if info is None:
             try:
-                self._gguf_cache[key] = gguf.summarize(p)
+                info = gguf.summarize(p)
             except gguf.GGUFError as e:
                 raise ApiError(f"Not a usable GGUF model: {e}") from e
-        return self._gguf_cache[key]
+            self.meta_cache.put(key, info, size=4096)
+        return info
 
     def installed_models(self) -> list[dict]:
         root = self.settings.models_dir()
@@ -97,9 +103,12 @@ class App:
 
     def apply_patch(self, patch: dict) -> dict:
         try:
-            return self.settings.update(patch)
+            applied = self.settings.update(patch)
         except ValueError as e:
             raise ApiError(str(e)) from e
+        if any(k.startswith("vgpu_") for k in applied):
+            self.vgpu.settings_changed(applied)
+        return applied
 
     def chat_payload(self, body: dict) -> dict:
         s = self.settings.all()
@@ -168,6 +177,7 @@ class App:
 
     def shutdown(self) -> None:
         self.worker.stop()
+        self.vgpu.stop()
         api_system.apply_on_exit(self)
         if self.settings.get("stop_server_on_exit"):
             self.server.stop()
@@ -208,7 +218,7 @@ def _browse(path: str, want_files: bool, ext: str) -> dict:
 
 
 # ============================================================ HTTP handler
-class Handler(SystemApi, LearningApi, BaseHTTPRequestHandler):
+class Handler(VGpuApi, SystemApi, LearningApi, BaseHTTPRequestHandler):
     server_version = "Duckstoken/" + __version__
     protocol_version = "HTTP/1.0"
 
@@ -300,7 +310,7 @@ class Handler(SystemApi, LearningApi, BaseHTTPRequestHandler):
     # state ------------------------------------------------------------
     def api_status(self, q, b):
         return {"version": __version__, "engine": APP.settings.get("engine"), "server": APP.server.status(),
-                "jobs": APP.jobs.list(),
+                "jobs": APP.jobs.list(), "prewarm": APP.vgpu.prewarm_state,
                 "model_path": APP.settings.get("model_path")}
 
     def api_hardware(self, q, b):
@@ -449,17 +459,17 @@ class Handler(SystemApi, LearningApi, BaseHTTPRequestHandler):
     # server control ----------------------------------------------------
     def api_server_start(self, q, b):
         try:
-            APP.server.start(APP.settings.all())
+            APP.vgpu.start_server(APP.settings.all(), force=bool(b.get("force")))
         except RuntimeError as e:
             raise ApiError(str(e)) from e
         return {"server": APP.server.status()}
 
     def api_server_stop(self, q, b):
-        APP.server.stop()
+        APP.vgpu.stop_server()
         return {"server": APP.server.status()}
 
     def api_server_restart(self, q, b):
-        APP.server.stop()
+        APP.vgpu.stop_server()
         time.sleep(0.5)
         return self.api_server_start(q, b)
 
@@ -629,11 +639,12 @@ def run(open_browser: bool | None = None, port: int | None = None, headless: boo
     serving.start()
     threading.Thread(target=hardware.get_hardware, daemon=True).start()  # warm the slow probes
     APP.worker.start()
+    APP.vgpu.start()
     threading.Thread(target=api_system.background_update_check, args=(APP,), daemon=True, name="update-check").start()
     if APP.settings.get("autostart_server"):
         try:
-            APP.server.start(APP.settings.all())
-        except RuntimeError as e:
+            APP.vgpu.start_server(APP.settings.all())
+        except (RuntimeError, ApiError) as e:
             print("Auto-start skipped:", e, flush=True)
     for name in ("SIGTERM", "SIGBREAK"):  # make `kill` / Ctrl+Break shut the model server down too
         if hasattr(signal, name):
