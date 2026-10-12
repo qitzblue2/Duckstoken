@@ -666,3 +666,45 @@ class HelperTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PurgeAndRetention(unittest.TestCase):
+    """Review finding: deleting a chat in the UI left its transcripts, queued jobs and training examples behind."""
+
+    def setUp(self):
+        import tempfile
+        from duckstoken.db import Database
+        from duckstoken.memory import MemoryStore
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = Database(Path(self.tmp.name) / "p.db")
+        self.addCleanup(self.db.close)
+        self.store = ExchangeStore(self.db, MemoryStore(self.db))
+
+    def add(self, chat, idx, **kw):
+        return self.store.record(chat, idx, [{"role": "user", "content": f"q{idx}"}], f"a{idx}", **kw)
+
+    def test_purge_chat_removes_log_queue_and_training_examples_of_that_chat_only(self):
+        a1, a2, b1 = self.add("A", 1), self.add("A", 3), self.add("B", 1)
+        now = __import__("time").time()
+        for ex in (a1, b1):
+            self.db.execute("INSERT INTO dataset_items(exchange_id, kind, messages_json, chosen, source, created) VALUES (?, 'sft', '[]', 'x', 'liked', ?)", (ex["id"], now))
+        self.db.execute("INSERT INTO queue(created, chat_id, exchange_id) VALUES (?, 'A', ?)", (now, a2["id"]))
+        out = self.store.purge_chat("A")
+        self.assertEqual(out, {"exchanges": 2, "dataset_items": 1, "queue": 1})
+        self.assertEqual(self.db.scalar("SELECT count(*) FROM exchanges"), 1)       # chat B untouched
+        self.assertEqual(self.db.scalar("SELECT count(*) FROM dataset_items"), 1)
+        self.assertEqual(self.store.purge_chat("A"), {"exchanges": 0, "dataset_items": 0, "queue": 0})
+
+    def test_retention_keeps_what_you_rated_corrected_or_approved(self):
+        old = __import__("time").time() - 100 * 86400
+        plain, rated, corrected, approved = (self.add("R", i) for i in (1, 2, 3, 4))
+        self.store.rate(rated["id"], 1)
+        self.store.correct(corrected["id"], "better answer")
+        self.db.execute("INSERT INTO dataset_items(exchange_id, kind, messages_json, chosen, source, created) VALUES (?, 'sft', '[]', 'x', 'liked', ?)", (approved["id"], old))
+        self.db.execute("UPDATE exchanges SET created = ?", (old,))
+        self.assertEqual(self.store.prune(0), 0)            # 0 = keep everything
+        self.assertEqual(self.store.prune(30), 1)           # only the plain, unrated one
+        left = {r["id"] for r in self.db.query("SELECT id FROM exchanges")}
+        self.assertEqual(left, {rated["id"], corrected["id"], approved["id"]})
+        self.assertEqual(self.store.prune(30), 0)

@@ -44,7 +44,9 @@ const Chat = {
     const c = { id: Date.now().toString(36), title: 'New chat', messages: [] };
     this.chats.unshift(c); this.cur = c.id; this.save(); this.renderList(); this.renderMsgs();
   },
-  deleteChat(id) {
+  async deleteChat(id) {
+    if (!(await confirmBox('Delete this chat?', 'Its logged answers, queued big-model jobs and training examples (Learning tab) are deleted too.', true))) return;
+    api('feedback/delete_chat', { chat_id: id }).catch(() => {});  // what Duckstoken logged for learning goes with it
     this.chats = this.chats.filter((c) => c.id !== id);
     if (!this.chats.length) return this.newChat();
     this.cur = this.chats[0].id; this.save(); this.renderList(); this.renderMsgs();
@@ -87,8 +89,8 @@ const Chat = {
     if (m.done && m.role === 'assistant' && m.content && !(m.tool_calls || []).length) el.append(this.actions(m, el));
     if (!m.content && !m.reasoning && !(m.tool_calls || []).length && !m.error && m.role === 'assistant') el.append(h('span', { class: 'muted' }, '…'));
   },
-  apiMessages() {
-    return this.chat.messages.filter((m) => !(m.role === 'assistant' && !m.content && !(m.tool_calls || []).length)).map((m) => {
+  apiMessages(chat = this.chat) {
+    return chat.messages.filter((m) => !(m.role === 'assistant' && !m.content && !(m.tool_calls || []).length)).map((m) => {
       const o = { role: m.role, content: m.content || '' };
       if (m.tool_calls?.length) { o.tool_calls = m.tool_calls; if (m.reasoning) o.reasoning_content = m.reasoning; }
       if (m.role === 'tool') o.tool_call_id = m.tool_call_id;
@@ -110,9 +112,10 @@ const Chat = {
       for (let round = 0; round < (S.values.max_tool_rounds || 8); round++) {
         const asst = { role: 'assistant', content: '', reasoning: '', tool_calls: [] };
         c.messages.push(asst);
-        const el = this.msgEl(asst); this.refs.msgs.append(el); this.scroll(true);
+        const el = this.msgEl(asst);
+        if (this.cur === c.id) { this.refs.msgs.append(el); this.scroll(true); }  // the user may have opened another chat meanwhile
         let ok = true;
-        try { await this.stream(asst, el); } catch (e) {
+        try { await this.stream(c, asst, el); } catch (e) {
           ok = false;
           if (e.name !== 'AbortError') asst.error = e.message; else asst.stats = (asst.stats || '') + ' (stopped)';
         }
@@ -122,18 +125,22 @@ const Chat = {
         for (const tc of asst.tool_calls) {
           const out = await this.runTool(tc);
           const tm = { role: 'tool', tool_call_id: tc.id, name: tc.function.name, content: out };
-          c.messages.push(tm); this.refs.msgs.append(this.msgEl(tm)); this.scroll(true);
+          c.messages.push(tm);
+          if (this.cur === c.id) { this.refs.msgs.append(this.msgEl(tm)); this.scroll(true); }
         }
         this.save();
       }
-    } finally { this.setBusy(false); this.ctrl = null; this.renderList(); this.armIdleExtract(c); }
+    } finally {
+      this.setBusy(false); this.ctrl = null; this.renderList(); this.armIdleExtract(c);
+      if (this.cur === c.id) this.renderMsgs();  // after switching away and back mid-answer, show the finished state
+    }
   },
-  async stream(asst, el) {
+  async stream(c, asst, el) {
     this.ctrl = new AbortController();
-    const res = await api('chat', { messages: this.apiMessages() }, { raw: true, signal: this.ctrl.signal });
+    const res = await api('chat', { messages: this.apiMessages(c) }, { raw: true, signal: this.ctrl.signal });
     if (!res.ok) { const d = await res.json().catch(() => ({})); throw new Error(d.error || 'HTTP ' + res.status); }
     let queued = false;
-    const repaint = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; this.fill(el, asst); this.scroll(); }); };
+    const repaint = () => { if (queued) return; queued = true; requestAnimationFrame(() => { queued = false; this.fill(el, asst); if (this.cur === c.id) this.scroll(); }); };
     const stats = (t) => { if (t) asst.stats = `${t.predicted_n ?? '?'} tokens · ${(t.predicted_per_second ?? 0).toFixed(1)} tok/s · prompt ${(t.prompt_per_second ?? 0).toFixed(0)} tok/s`; };
     const calls = [];
     const take = (delta) => {
@@ -303,9 +310,11 @@ const Chat = {
     try {
       let r = await api('tools/call', body);
       if (r.needs_approval) {
-        if (!this.always.has(name)) {
-          const d = await modal('The AI wants to use your PC', h('div', {}, h('p', {}, h('b', {}, name)), h('pre', { class: 'log', style: 'height:auto;max-height:260px' }, r.description)),
-            [{ label: 'Deny', value: 'no', danger: true }, { label: 'Allow once', value: 'once', primary: true }, { label: `Always allow “${name}” in this session`, value: 'always' }]);
+        if (r.no_always || !this.always.has(name)) {  // risky calls (writes, commands, secrets) are asked every time
+          const buttons = [{ label: 'Deny', value: 'no', danger: true }, { label: 'Allow once', value: 'once', primary: true }];
+          if (!r.no_always) buttons.push({ label: `Always allow “${name}” in this session`, value: 'always' });
+          const d = await modal(r.sensitive ? '⚠ The AI wants to touch private data' : 'The AI wants to use your PC',
+            h('div', {}, h('p', {}, h('b', {}, name)), h('pre', { class: 'log', style: 'height:auto;max-height:320px' }, r.description)), buttons);
           if (d !== 'once' && d !== 'always') return 'The user denied this action.';
           if (d === 'always') this.always.add(name);
         }

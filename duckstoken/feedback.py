@@ -303,6 +303,26 @@ class ExchangeStore:
     def delete_chat(self, chat_id) -> int:
         return self.db.execute("DELETE FROM exchanges WHERE chat_id = ?", (_arg(chat_id, MAX_NAME + 1),)).rowcount
 
+    def purge_chat(self, chat_id) -> dict:
+        """Everything Duckstoken kept about a chat the user deleted: logged answers, queued big-model jobs, and the training
+        examples built from them. Returns how many of each were removed."""
+        cid = _arg(chat_id, MAX_NAME + 1)
+        with self.db.transaction():
+            items = self.db.execute("DELETE FROM dataset_items WHERE exchange_id IN (SELECT id FROM exchanges WHERE chat_id = ?)", (cid,)).rowcount
+            jobs = self.db.execute("DELETE FROM queue WHERE chat_id = ? OR exchange_id IN (SELECT id FROM exchanges WHERE chat_id = ?)", (cid, cid)).rowcount
+            logged = self.db.execute("DELETE FROM exchanges WHERE chat_id = ?", (cid,)).rowcount
+        return {"exchanges": logged, "dataset_items": items, "queue": jobs}
+
+    def prune(self, days: float) -> int:
+        """Retention: forget answers older than `days` that nobody rated, corrected or approved for training (those are the
+        ones that make the model better and stay until you delete them). 0 or less keeps everything."""
+        if not days or days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        return self.db.execute(
+            "DELETE FROM exchanges WHERE created < ? AND rating = 0 AND correction = '' AND teacher_answer = '' "
+            "AND id NOT IN (SELECT exchange_id FROM dataset_items)", (cutoff,)).rowcount
+
     # ------------------------------------------------------------------ reading
     def get(self, id, include_messages=False) -> dict | None:
         id = _as_id(id)

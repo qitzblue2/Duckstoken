@@ -29,6 +29,12 @@ function h(tag, attrs, ...kids) {
   for (const c of kids.flat(Infinity)) { if (c == null || c === false) continue; e.append(c.nodeType ? c : document.createTextNode(String(c))); }
   return e;
 }
+/* The DOM's own append() prints "[object HTMLDivElement]" for an array and "null" for null. Everything in this UI is built
+   with arrays and optional children, so make append() flatten and skip empty children the way h() does. */
+(function () {
+  const native = Element.prototype.append;
+  Element.prototype.append = function (...kids) { return native.apply(this, kids.flat(Infinity).filter((c) => c != null && c !== false)); };
+})();
 const clear = (el) => { while (el.firstChild) el.removeChild(el.firstChild); return el; };
 const fmtGB = (x) => (x == null ? '?' : Number(x).toFixed(x >= 100 ? 0 : 1) + ' GB');
 const fmtBytes = (b) => { b = Number(b) || 0; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return b.toFixed(i > 1 ? 1 : 0) + ' ' + u[i]; };

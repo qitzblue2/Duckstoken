@@ -302,6 +302,36 @@ class Jobs(VGpuApiBase):
             appmod.APP.vgpu.jobs.wait(10)
 
 
+class PrewarmThenStart(VGpuApiBase):
+    def test_a_second_start_while_preparing_is_refused_and_stop_really_prevents_the_start(self):
+        # review finding: the second Start orphaned the first cancel Event, so Stop did not stop the server from starting later
+        import threading
+        from unittest import mock
+        from duckstoken.vgpu import runtime as rt_mod
+        release, started = threading.Event(), []
+
+        def slow_prewarm(path, max_bytes, cancel=None, progress=None, **kw):
+            while not cancel.is_set() and not release.wait(0.05):
+                pass
+            return {"completed": False, "bytes_read": 0, "stopped_because": "cancelled", "mb_per_s": {"value": None}}
+
+        s = vgpu_kit.fake_settings(self.tmp.name)
+        appmod.APP.settings.update({"llama_server_path": s["llama_server_path"], "model_path": self.model, "port": ti.free_port(),
+                                    "vgpu_prewarm": "before_start"})
+        rt = appmod.APP.vgpu
+        with mock.patch.object(rt_mod, "run_prewarm", slow_prewarm), \
+                mock.patch.object(appmod.APP.server, "start", side_effect=lambda cfg: started.append(1)):
+            rt.start_server(appmod.APP.settings.all())
+            with self.assertRaises(appmod.ApiError) as cm:
+                rt.start_server(appmod.APP.settings.all())
+            self.assertEqual(cm.exception.status, 409)
+            rt.stop_server()                       # cancels the prewarm that is in flight
+            rt._prewarm_thread.join(5)
+            self.assertFalse(rt._prewarm_thread.is_alive())
+            release.set()
+        self.assertEqual(started, [], "the server must not start after an explicit Stop")
+
+
 class AdmissionGate(VGpuApiBase):
     @POSIX
     def test_impossible_model_is_refused_before_anything_starts_but_can_be_forced(self):

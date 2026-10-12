@@ -9,7 +9,7 @@ const OBJECTIVES = {
 };
 
 const VOptimizer = {
-  refs: {}, timer: null, candidates: [], lastResult: null,
+  refs: {}, timer: null, candidates: [], lastJobId: null,
   init(el) {
     const r = this.refs;
     r.model = h('select', { onchange: () => { this.loadCandidates(); this.loadProfile(); } });
@@ -129,8 +129,10 @@ const VOptimizer = {
         j.error ? h('div', { class: 'note bad' }, j.error) : null,
         j.state === 'running' ? h('button', { onclick: () => api('vgpu/job/cancel', {}).then(() => this.pollJob()).catch(fail) }, 'Cancel (stops safely, nothing is applied)') : null,
         (j.log || []).length ? h('details', {}, h('summary', { class: 'muted small' }, 'Log'), h('pre', { class: 'log', style: 'height:140px' }, j.log.join('\n'))) : null));
-      if (j.state === 'done' && j.result && j.result !== this.lastResult) {
-        this.lastResult = j.result; this.renderResult(j.kind, j.result); this.loadHistory(); this.loadProfile();
+      if (j.state === 'done' && j.id !== this.lastJobId) {  // the finished job stays in the runner until the next one: act once per job id
+        this.lastJobId = j.id;
+        if (j.kind === 'optimization' || j.kind === 'benchmark') { this.renderResult(j.kind, j.result); this.loadHistory(); this.loadProfile(); }
+        else if (j.kind === 'stage') toast(j.result && j.result.ok ? 'Model copied to the fast drive' : 'Copy finished', 'ok');
       }
     } catch (e) { /* page not active */ }
   },
@@ -177,7 +179,7 @@ const VOptimizer = {
   benchDetail(b) {
     const w = (b.warm && b.warm.gen_tps) || {}, pp = (b.warm && b.warm.prompt_tps) || {}, tt = (b.warm && b.warm.ttft_s) || {};
     const cold = b.cold || {};
-    const f = (v, d = 2) => (v == null ? h('span', { class: 'unavail' }, 'n/a') : Number(VU.n(v)).toFixed(d));
+    const f = (v, d = 2) => { const x = VU.n(v); return x == null ? h('span', { class: 'unavail' }, 'n/a') : Number(x).toFixed(d); };
     const m = b.metrics || {};
     return h('div', {},
       h('div', { class: 'row' }, VU.statusChip(b.status === 'ok' ? 'ok' : 'fail'), h('b', {}, (b.model && b.model.name) || ''), h('span', { class: 'muted small' }, VU.when(b.created))),

@@ -4,7 +4,7 @@ function controlFor(spec, onChange) {
   const commit = (val) => onChange(val);
   if (t === 'bool') {
     const cb = h('input', { type: 'checkbox', checked: !!v, onchange: async (e) => {
-      if (spec.danger && e.target.checked && !(await confirmBox('Are you sure?', `“${spec.label}” gives the AI more power over your PC.\n\n${spec.help || ''}\n\nOnly enable this for models and prompts you trust.`, true))) { e.target.checked = false; return; }
+      if (spec.danger && e.target.checked !== !!spec.default && !(await confirmBox('Are you sure?', `“${spec.label}” gives the AI more power over your PC.\n\n${spec.help || ''}\n\nOnly change this for models and prompts you trust.`, true))) { e.target.checked = !e.target.checked; return; }
       commit(e.target.checked); } });
     return h('label', { class: 'switch' }, cb, h('span'));
   }
@@ -83,12 +83,29 @@ const Settings = {
     const ok = await modal('Save profile', box, [{ label: 'Cancel', value: false }, { label: 'Save', value: true, primary: true }]);
     if (ok && box.value.trim()) { try { const r = await api('profiles/save', { name: box.value.trim() }); S.profiles = r.profiles; this.render(); toast('Saved', 'ok'); } catch (e) { fail(e); } }
   },
-  async loadProfile() { const n = this.refs.profile.value; if (!n) return; try { const r = await api('profiles/load', { name: n }); S.values = r.values; this.render(); toast('Loaded ' + n, 'ok'); this.markDirty(); } catch (e) { fail(e); } },
+  /* Importing a file or loading a profile may change PC-access switches or the program that runs: the server asks for confirmation. */
+  async withRiskCheck(path, body) {
+    try { return await api(path, body); } catch (e) {
+      const risky = e.data && e.data.needs_confirmation;
+      if (!risky) throw e;
+      const ok = await modal('This changes what the AI may do on your PC', h('div', {}, h('p', {}, e.message),
+        h('table', { class: 'compact' }, h('tbody', {}, risky.map((c) => h('tr', {}, h('td', {}, c.label), h('td', { class: 'mono small' }, JSON.stringify(c.from) + ' → ' + JSON.stringify(c.to))))))),
+        [{ label: 'Cancel', value: false }, { label: 'Apply anyway', value: true, danger: true }]);
+      if (!ok) return null;
+      return api(path, { ...body, confirm_risky: true });
+    }
+  },
+  async loadProfile() { const n = this.refs.profile.value; if (!n) return; try { const r = await this.withRiskCheck('profiles/load', { name: n }); if (!r) return; S.values = r.values; this.render(); toast('Loaded ' + n, 'ok'); this.markDirty(); } catch (e) { fail(e); } },
   async delProfile() { const n = this.refs.profile.value; if (!n || !await confirmBox('Delete profile?', n, true)) return; const r = await api('profiles/delete', { name: n }); S.profiles = r.profiles; this.render(); },
-  exportAll() { const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(S.values, null, 2)], { type: 'application/json' })), download: 'duckstoken-settings.json' }); a.click(); },
+  exportAll() {
+    const out = { ...S.values };  // a settings file is the thing people paste into forum posts: never include keys and tokens
+    S.schema.filter((x) => x.type === 'password').forEach((x) => { out[x.key] = ''; });
+    const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' })), download: 'duckstoken-settings.json' }); a.click();
+    toast('Exported without API keys or tokens', 'ok');
+  },
   async importAll() {
     const f = h('input', { type: 'file', accept: '.json' });
-    f.onchange = async () => { try { const vals = JSON.parse(await f.files[0].text()); const r = await api('settings/import', { values: vals }); S.values = r.values; this.render(); toast('Imported', 'ok'); } catch (e) { fail(e); } };
+    f.onchange = async () => { try { const vals = JSON.parse(await f.files[0].text()); const r = await this.withRiskCheck('settings/import', { values: vals }); if (!r) return; S.values = r.values; this.render(); toast('Imported', 'ok'); } catch (e) { fail(e); } };
     f.click();
   },
   async resetAll() { if (!await confirmBox('Reset all settings?', 'Every setting (including paths) goes back to its default.', true)) return; const r = await api('settings/reset', {}); S.values = r.values; this.render(); },

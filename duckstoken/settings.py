@@ -224,6 +224,9 @@ SCHEMA: list[dict] = [
     _s("tool_memory", "Let the AI save/search memory itself (tools)", "learning", "bool", True, live=True),
     _s("confirm_memory_save", "Ask me before the AI saves a memory", "learning", "bool", True,
        "Recommended: web pages and documents can try to plant false 'memories'.", live=True),
+    _s("exchange_retention_days", "Forget unrated logged answers after (days, 0 = keep)", "learning", "int", 0,
+       "Answers you rated, corrected or approved for training are kept; the rest of the log is deleted after this many days.",
+       min=0, max=3650),
     _s("record_exchanges", "Keep a log of questions and answers (for ratings & training data)", "learning", "bool",
        True, "Local only. Needed for 👍/👎, corrections and the training-data sandbox.", live=True),
     _s("examples_enabled", "Show the AI examples of answers you liked", "learning", "bool", True,
@@ -257,7 +260,9 @@ SCHEMA: list[dict] = [
     _s("web_cache_minutes", "Cache search results (minutes)", "web", "int", 30, min=0, max=1440, live=True),
     _s("web_timeout", "Web request timeout (seconds)", "web", "int", 15, min=3, max=120, live=True),
     _s("web_save_to_memory", "Save useful pages to memory as 'web' notes", "web", "bool", False, live=True),
-    _s("confirm_web", "Ask me before the AI uses web tools", "web", "bool", False, live=True),
+    _s("confirm_web", "Ask me before the AI uses web tools", "web", "bool", True, live=True,
+       help="On by default: a web page can try to talk the model into sending your files out through a web tool. "
+            "Turning this off means the AI can fetch URLs (and put data in them) without asking."),
     _s("web_allow_private", "Allow web tools to reach private/local addresses", "web", "bool", False,
        "Leave off: it stops a web page from steering the AI into your home network.", live=True, danger=True,
        advanced=True),
@@ -400,6 +405,34 @@ def coerce(spec: dict, value: Any) -> Any:
     if "max" in spec:
         v = min(spec["max"], v)
     return v
+
+
+# Settings that decide what runs on the PC or where data goes. Importing a settings file or loading a profile that changes
+# any of them (or any "pc" tool switch, or any danger-flagged switch away from its default) must be confirmed by the user:
+# otherwise a settings file shared as "my best settings" could switch off every approval prompt.
+PRIVILEGED = {"llama_server_path", "extra_args", "lora_path", "llama_dir", "models_dir", "searxng_url", "external_url", "host",
+              "big_model_path", "vgpu_cache_dir", "update_channel", "update_auto_install", "launch_at_startup"}
+
+
+def risky_changes(current: dict, patch: dict) -> list[dict]:
+    """The entries of `patch` that need an explicit confirmation before they are applied: [{key, label, from, to}]."""
+    out = []
+    for k, v in patch.items():
+        spec = SCHEMA_BY_KEY.get(k)
+        if spec is None:
+            continue
+        try:
+            new = coerce(spec, v)
+        except ValueError:
+            continue
+        old = current.get(k, spec["default"])
+        if new == old:
+            continue
+        away_from_default = new != spec["default"]
+        if k in PRIVILEGED or spec["group"] == "pc" and away_from_default or spec.get("danger") and away_from_default:
+            out.append({"key": k, "label": spec["label"], "from": "" if spec["type"] == "password" else old,
+                        "to": "(hidden)" if spec["type"] == "password" else new})
+    return out
 
 
 def validate_patch(patch: dict) -> dict:

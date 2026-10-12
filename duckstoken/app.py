@@ -376,7 +376,9 @@ class Handler(VGpuApi, SystemApi, LearningApi, BaseHTTPRequestHandler):
         vals = APP.profiles.get(b.get("name", ""))
         if vals is None:
             raise ApiError("No such profile")
-        APP.apply_patch({k: v for k, v in vals.items() if k in st.SCHEMA_BY_KEY})
+        vals = {k: v for k, v in vals.items() if k in st.SCHEMA_BY_KEY}
+        self._confirm_risky(vals, b)
+        APP.apply_patch(vals)
         return {"values": APP.settings.all()}
 
     def api_profiles_delete(self, q, b):
@@ -385,8 +387,17 @@ class Handler(VGpuApi, SystemApi, LearningApi, BaseHTTPRequestHandler):
 
     def api_settings_import(self, q, b):
         vals = {k: v for k, v in (b.get("values") or {}).items() if k in st.SCHEMA_BY_KEY}
+        self._confirm_risky(vals, b)
         APP.apply_patch(vals)
         return {"values": APP.settings.all()}
+
+    @staticmethod
+    def _confirm_risky(vals: dict, b: dict) -> None:
+        """A file or profile must not silently grant PC access, turn off approvals or point the launcher at another program."""
+        risky = st.risky_changes(APP.settings.all(), vals)
+        if risky and b.get("confirm_risky") is not True:
+            raise ApiError("These settings change what the AI may do on your PC or which program Duckstoken runs. "
+                           "Review them and confirm.", 409, needs_confirmation=risky)
 
     # models / tuning ---------------------------------------------------
     def api_models(self, q, b):
@@ -526,11 +537,15 @@ class Handler(VGpuApi, SystemApi, LearningApi, BaseHTTPRequestHandler):
             except ValueError:
                 return {"ok": False, "output": "Error: tool arguments were not valid JSON"}
         try:
-            needs = APP.tools.needs_approval(name)
+            needs = APP.tools.needs_approval(name, args)
         except Exception as e:  # noqa: BLE001 - ToolError
             return {"ok": False, "output": f"Error: {e}"}
         if needs and not b.get("approved"):
-            return {"needs_approval": True, "description": APP.tools.describe(name, args)}
+            risk = APP.tools.risk(name, args)
+            desc = APP.tools.describe(name, args)
+            if risk["reason"]:
+                desc = f"WARNING: {risk['reason']}.\n\n{desc}"
+            return {"needs_approval": True, "description": desc, "no_always": risk["no_always"], "sensitive": risk["sensitive"]}
         return APP.tools.execute(name, args)
 
     def api_tools_audit(self, q, b):
@@ -653,6 +668,10 @@ def run(open_browser: bool | None = None, port: int | None = None, headless: boo
     serving.start()
     threading.Thread(target=hardware.get_hardware, daemon=True).start()  # warm the slow probes
     APP.worker.start()
+    try:
+        APP.exchanges.prune(APP.settings.get("exchange_retention_days"))
+    except Exception:  # noqa: BLE001 - housekeeping must never stop the app from starting
+        pass
     APP.vgpu.start()
     threading.Thread(target=api_system.background_update_check, args=(APP,), daemon=True, name="update-check").start()
     if APP.settings.get("autostart_server"):

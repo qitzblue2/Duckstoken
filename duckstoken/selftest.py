@@ -78,9 +78,15 @@ def _fts5() -> str:
 
 
 # (name, function, required in a frozen build)
-CHECKS = [("web ui files", _web_assets, True), ("pywebview module", _webview, True), ("pywebview windows backend", _webview_backend, False),
-          ("tray (pystray + Pillow)", _tray, os.name == "nt"),   # pystray needs a display server: not available on headless Linux ("numpy (built-in engine)", _numpy, True), ("bundled llama.cpp engine", _engine, True),
-          ("sqlite FTS5 (memory search)", _fts5, False)]
+CHECKS = [
+    ("web ui files", _web_assets, True),
+    ("pywebview module", _webview, True),
+    ("pywebview windows backend", _webview_backend, False),
+    ("tray (pystray + Pillow)", _tray, os.name == "nt"),   # pystray needs a display server: not available on headless Linux
+    ("numpy (built-in engine)", _numpy, True),
+    ("bundled llama.cpp engine", _engine, True),
+    ("sqlite FTS5 (memory search)", _fts5, False),
+]
 
 
 def run(out_path: str | None = None) -> int:
