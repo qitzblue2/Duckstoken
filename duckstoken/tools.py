@@ -97,6 +97,30 @@ def _inside(child: str, parent: str) -> bool:
         return False
 
 
+# Places that hold credentials or private data. A prompt-injected page can tell the model to read these and then send the
+# contents out through a web tool, so reading or writing them always needs an explicit, per-call approval.
+_SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".kube", ".azure", ".gcloud", ".docker", ".password-store"}
+_SECRET_NAMES = {".netrc", "_netrc", ".git-credentials", ".npmrc", ".pypirc", ".env", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+                 "ntuser.dat", "login data", "cookies", "web data", "key4.db", "logins.json", "credentials", "credentials.json"}
+_SECRET_SUFFIXES = (".pem", ".key", ".pfx", ".p12", ".kdbx", ".ppk", ".keystore", ".jks")
+_BROWSERS = {"chrome", "chromium", "edge", "brave", "vivaldi", "opera", "firefox"}
+
+
+def sensitive_reason(normalized_path: str) -> str | None:
+    """Why this path should never be touched without asking (credentials, browser profiles, private keys), else None."""
+    parts = [x for x in os.path.normcase(normalized_path).replace("\\", "/").lower().split("/") if x]
+    name = parts[-1] if parts else ""
+    if any(d in parts for d in _SECRET_DIRS):
+        return "it is inside a credentials folder (.ssh, .aws, .gnupg ...)"
+    if ("user data" in parts or "profiles" in parts or "mozilla" in parts) and any(b in parts for b in _BROWSERS | {"mozilla"}):
+        return "it is a browser profile (saved passwords and cookies)"
+    if name in _SECRET_NAMES or name.startswith(".env.") or name.endswith(_SECRET_SUFFIXES):
+        return "it looks like a secret (key, token or credentials file)"
+    if any(w in name for w in ("password", "passwd", "secret")):
+        return "its name suggests it holds passwords or secrets"
+    return None
+
+
 class ToolRunner:
     def __init__(self, get_settings: Callable[[], dict], memory=None, web=None):
         self.get = get_settings
@@ -124,6 +148,8 @@ class ToolRunner:
             raise ToolError("A path is required")
         s = self.get()
         p = _norm(raw)
+        if _inside(p, _norm(str(paths.data_dir()))):  # never, even with Full PC access: it holds the API keys and tokens
+            raise ToolError("Access denied: that is Duckstoken's own data folder (it stores your settings and API keys).")
         if not s["full_pc_access"]:
             roots = s["allowed_roots"] or [str(Path.home())]
             if not any(_inside(p, _norm(r)) for r in roots):
@@ -140,7 +166,9 @@ class ToolRunner:
             return f"Run command:\n{args.get('command', '')}" + (f"\n(in {args['cwd']})" if args.get("cwd") else "")
         if name == "write_file":
             mode = "Append to" if args.get("append") else "Write"
-            return f"{mode} file: {args.get('path')}\n({len(str(args.get('content', '')))} characters)"
+            content = str(args.get("content", ""))
+            shown = content if len(content) <= 4000 else content[:4000] + f"\n... [{len(content) - 4000} more characters not shown]"
+            return f"{mode} file: {args.get('path')}\n({len(content)} characters) - this is exactly what will be written:\n\n{shown}"
         if name in ("fetch_url", "web_read"):
             return f"Fetch: {args.get('url')}"
         if name == "web_search":
@@ -157,9 +185,29 @@ class ToolRunner:
             raise ToolError(f"Tool '{name}' is not enabled")
         return spec
 
-    def needs_approval(self, name: str) -> bool:
+    def sensitive_reason(self, name: str, args: dict | None) -> str | None:
+        """Why this call touches credentials or private data (a path argument in a secret location), else None."""
+        for key in ("path", "root", "cwd"):
+            v = (args or {}).get(key)
+            if isinstance(v, str) and v:
+                try:
+                    why = sensitive_reason(_norm(v))
+                except (OSError, ValueError):
+                    why = None
+                if why:
+                    return why
+        return None
+
+    def needs_approval(self, name: str, args: dict | None = None) -> bool:
         spec = self.validate_call(name)
+        if self.sensitive_reason(name, args):
+            return True  # whatever the "ask first" switches say
         return bool(spec["confirm"] and self.get()[spec["confirm"]])
+
+    def risk(self, name: str, args: dict | None = None) -> dict:
+        """What the approval dialog needs: is this call risky enough that 'always allow' must not be offered?"""
+        why = self.sensitive_reason(name, args)
+        return {"sensitive": bool(why), "reason": why, "no_always": bool(why) or name in ("write_file", "run_command")}
 
     # ------------------------------------------------------------- execution
     def execute(self, name: str, args: dict) -> dict:

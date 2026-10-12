@@ -17,7 +17,7 @@ from pathlib import Path
 
 UA = "Duckstoken/0.1 (+https://github.com/qitzblue2/duckstoken)"
 HF = "https://huggingface.co"
-LLAMA_RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+LLAMA_RELEASES = "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15"
 _SHARD = re.compile(r"^(?P<base>.*)-(?P<n>\d{5})-of-(?P<total>\d{5})\.gguf$", re.I)
 
 
@@ -198,14 +198,41 @@ def start_hf_download(jobs: JobManager, repo: str, files: list[dict], dest_dir: 
 
 
 # --------------------------------------------------------------- llama.cpp
+def windows_assets(release: dict) -> list[dict]:
+    """The finished Windows x64 zips of one release (an asset that is still being uploaded is not listed)."""
+    assets = [{"name": a["name"], "url": a["browser_download_url"], "size": a["size"], "digest": a.get("digest") or ""}
+              for a in release.get("assets", [])
+              if a["name"].endswith(".zip") and a.get("state", "uploaded") == "uploaded"]
+    return [a for a in assets if "win" in a["name"].lower() and "x64" in a["name"].lower()
+            and "arm" not in a["name"].lower()]
+
+
+def choose_llama_release(releases: list[dict], backend: str) -> tuple[dict, list[dict], list[dict]]:
+    """(release, its Windows zips, the zips to install) for the newest release that has everything `backend` needs.
+
+    llama.cpp creates each release first - as a pre-release, which `/releases/latest` never returns - and uploads its
+    ~60 archives one by one afterwards, so the newest entries are often empty or incomplete. Drafts are skipped.
+    """
+    seen = []
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        win = windows_assets(rel)
+        picked = pick_assets(win, backend)
+        # pick_assets falls back to the CPU zip when the wanted backend is not (yet) uploaded: that is not a match
+        complete = bool(picked) and (backend not in ("cuda", "vulkan") or backend in picked[0]["name"].lower()) \
+            and (backend != "cuda" or len(picked) == 2)  # CUDA also needs its cudart zip
+        if complete:
+            return rel, win, picked
+        seen.append(f"{rel.get('tag_name', '?')}: {len(win)} Windows x64 zips")
+    raise LookupError(f"None of the {len(seen)} newest llama.cpp releases has a Windows {backend} build ({'; '.join(seen[:6])})")
+
+
 def list_llama_assets(backend: str = "auto") -> dict:
     with _request(LLAMA_RELEASES, {"Accept": "application/vnd.github+json"}) as r:
-        rel = json.load(r)
-    assets = [{"name": a["name"], "url": a["browser_download_url"], "size": a["size"]}
-              for a in rel.get("assets", []) if a["name"].endswith(".zip")]
-    win = [a for a in assets if "win" in a["name"].lower() and "x64" in a["name"].lower()
-           and "arm" not in a["name"].lower()]
-    return {"tag": rel.get("tag_name", ""), "assets": win, "recommended": pick_assets(win, backend)}
+        releases = json.load(r)
+    rel, win, picked = choose_llama_release(releases, backend)
+    return {"tag": rel.get("tag_name", ""), "assets": win, "recommended": picked}
 
 
 def pick_assets(win_assets: list[dict], backend: str) -> list[dict]:

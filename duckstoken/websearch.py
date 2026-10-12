@@ -344,6 +344,21 @@ def _describe(error: Exception, host: str) -> str:
     return f"Could not get a response from {host}: {str(error)[:150] or error.__class__.__name__}"
 
 
+def _expire(conn, flag: threading.Event) -> None:
+    """Deadline reached: unblock whatever read is waiting on this connection."""
+    flag.set()
+    sock = getattr(conn, "sock", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
 def _get(url: str, *, timeout: float, allow_private: bool, accept: str, types: tuple[str, ...],
          secret_headers: dict | None = None) -> _Reply:
     """GET `url`, following at most MAX_REDIRECTS redirects, checking every hop. Raises WebError."""
@@ -357,6 +372,12 @@ def _get(url: str, *, timeout: float, allow_private: bool, accept: str, types: t
             headers.update(secret_headers or {})
         conn = (_HTTPSConnection if target.scheme == "https" else _HTTPConnection)(
             target.host, target.port, target.addrs, timeout)
+        # The socket timeout restarts with every byte, so a server that trickles data never trips it. A timer closes the
+        # connection at the overall deadline, which also covers the header phase.
+        expired = threading.Event()
+        timer = threading.Timer(max(deadline - time.monotonic(), 0.05), _expire, args=(conn, expired))
+        timer.daemon = True
+        timer.start()
         try:
             conn.request("GET", target.request, headers=headers)
             resp = conn.getresponse()
@@ -373,13 +394,18 @@ def _get(url: str, *, timeout: float, allow_private: bool, accept: str, types: t
             if ctype and ctype not in types:
                 raise WebError(f"Cannot read '{ctype}' content; only web pages, text and JSON")
             body, truncated = _read_body(resp, MAX_BODY, deadline)
+            if expired.is_set():
+                raise WebError("The server was too slow to send the page")
             if not ctype and b"\0" in body[:1024]:
                 raise WebError("Cannot read binary content; only web pages, text and JSON")
             charset = re.search(r"charset\s*=\s*[\"']?([\w.:-]+)", params, re.I)
             return _Reply(url, resp.status, ctype, charset.group(1) if charset else "", body, truncated)
         except (OSError, http.client.HTTPException, ValueError, zlib.error) as e:
+            if expired.is_set():
+                raise WebError("The server was too slow to send the page") from e
             raise WebError(_describe(e, target.host)) from e
         finally:
+            timer.cancel()
             conn.close()
     raise WebError(f"Too many redirects (more than {MAX_REDIRECTS})")
 

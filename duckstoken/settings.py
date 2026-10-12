@@ -25,6 +25,9 @@ GROUPS = [
     ("learning", "Learning & memory"),
     ("web", "Web & research"),
     ("big", "Big model (escalation)"),
+    ("vgpu", "Virtual GPU & memory manager"),
+    ("engine", "Engine"),
+    ("app", "App & updates"),
 ]
 
 CACHE_TYPES = ["f16", "q8_0", "q4_0", "q4_1", "q5_0", "q5_1", "iq4_nl", "bf16", "f32"]
@@ -123,6 +126,10 @@ SCHEMA: list[dict] = [
        help="Turn off to keep the KV cache in system RAM (frees VRAM on tiny GPUs)."),
     _s("swa_full", "Full-size sliding-window cache", "memory", "bool", False, flag="--swa-full", when=True,
        advanced=True),
+    _s("op_offload", "Offload big batch operations to the GPU", "memory", "bool", True, flag="--no-op-offload",
+       when=False, advanced=True,
+       help="While reading your prompt, llama.cpp can copy CPU-resident weights over PCIe to the GPU. On a slow link or a "
+            "tiny GPU this can be slower than staying on the CPU - the Optimizer measures both."),
     _s("cache_reuse", "Prompt cache reuse (min chunk)", "memory", "int", 0, min=0, max=65536,
        flag="--cache-reuse", skip_if=[0], advanced=True),
     _s("main_gpu", "Main GPU index", "memory", "int", 0, min=0, max=16, flag="-mg", skip_if=[0],
@@ -217,6 +224,9 @@ SCHEMA: list[dict] = [
     _s("tool_memory", "Let the AI save/search memory itself (tools)", "learning", "bool", True, live=True),
     _s("confirm_memory_save", "Ask me before the AI saves a memory", "learning", "bool", True,
        "Recommended: web pages and documents can try to plant false 'memories'.", live=True),
+    _s("exchange_retention_days", "Forget unrated logged answers after (days, 0 = keep)", "learning", "int", 0,
+       "Answers you rated, corrected or approved for training are kept; the rest of the log is deleted after this many days.",
+       min=0, max=3650),
     _s("record_exchanges", "Keep a log of questions and answers (for ratings & training data)", "learning", "bool",
        True, "Local only. Needed for 👍/👎, corrections and the training-data sandbox.", live=True),
     _s("examples_enabled", "Show the AI examples of answers you liked", "learning", "bool", True,
@@ -250,7 +260,9 @@ SCHEMA: list[dict] = [
     _s("web_cache_minutes", "Cache search results (minutes)", "web", "int", 30, min=0, max=1440, live=True),
     _s("web_timeout", "Web request timeout (seconds)", "web", "int", 15, min=3, max=120, live=True),
     _s("web_save_to_memory", "Save useful pages to memory as 'web' notes", "web", "bool", False, live=True),
-    _s("confirm_web", "Ask me before the AI uses web tools", "web", "bool", False, live=True),
+    _s("confirm_web", "Ask me before the AI uses web tools", "web", "bool", True, live=True,
+       help="On by default: a web page can try to talk the model into sending your files out through a web tool. "
+            "Turning this off means the AI can fetch URLs (and put data in them) without asking."),
     _s("web_allow_private", "Allow web tools to reach private/local addresses", "web", "bool", False,
        "Leave off: it stops a web page from steering the AI into your home network.", live=True, danger=True,
        advanced=True),
@@ -286,6 +298,79 @@ SCHEMA: list[dict] = [
        "Optional. A fine-tune trained from your exported data (see Learning → Training data).", kind="file",
        advanced=True),
     _s("lora_scale", "LoRA strength", "server", "float", 1.0, min=0, max=4, advanced=True),
+
+    # -------------------------------------------------------------------- vgpu
+    _s("vgpu_monitor", "Monitor memory, CPU and GPU while running", "vgpu", "bool", True,
+       "Samples real telemetry (RAM, swap, CPU, NVIDIA GPU, the model process) for the Memory page and the Dashboard."),
+    _s("vgpu_monitor_interval", "Monitor interval (seconds)", "vgpu", "int", 2, min=1, max=60, advanced=True),
+    _s("vgpu_pressure_action", "When memory pressure becomes critical", "vgpu", "select", "warn",
+       "warn = only tell me. stop_big_model = unload the big escalation model. stop_all = also stop the chat model "
+       "(prevents the whole PC from freezing).", options=["warn", "stop_big_model", "stop_all"]),
+    _s("vgpu_admission", "Check a model before loading it", "vgpu", "select", "enforce",
+       "enforce = refuse loads that cannot work (you can still force). warn = show the problems but load anyway. off = no check.",
+       options=["enforce", "warn", "off"]),
+    _s("vgpu_autofit", "Reduce GPU offload automatically when it would not fit in VRAM", "vgpu", "bool", True,
+       "If the only thing stopping a model from loading is GPU offload bigger than your card's VRAM, Duckstoken lowers "
+       "n_gpu_layers / n_cpu_moe for that start only and tells you. Your saved settings are not changed."),
+    _s("vgpu_os_reserve_gb", "Memory kept free for Windows and other apps (GB)", "vgpu", "float", 6.0,
+       "The planner never hands this memory to the model.", min=0, max=128),
+    _s("vgpu_safety_margin_pct", "Safety margin on the estimate (%)", "vgpu", "float", 5.0, min=0, max=50),
+    _s("vgpu_vram_reserve_mb", "VRAM kept free for the desktop and driver (MB)", "vgpu", "int", 400, min=0, max=8192),
+    _s("vgpu_max_spill_pct", "Most of the model allowed to page from disk (%)", "vgpu", "int", 50,
+       "Past this the model would spend its time reading the drive. Hard drives tolerate almost none.",
+       min=0, max=100, advanced=True),
+    _s("vgpu_objective", "Optimizer goal", "vgpu", "select", "balanced",
+       "max_model_size = biggest model that still runs usably. max_speed = fastest measured tokens/s. balanced = speed per GB of memory.",
+       options=["max_model_size", "max_speed", "balanced"]),
+    _s("vgpu_min_tps", "Slowest acceptable speed (tokens/s)", "vgpu", "float", 1.0,
+       "Used by the 'max model size' goal.", min=0.1, max=100),
+    _s("vgpu_bench_prompt_tokens", "Benchmark prompt length (tokens)", "vgpu", "int", 512, min=16, max=32768, advanced=True),
+    _s("vgpu_bench_gen_tokens", "Benchmark generated tokens", "vgpu", "int", 64, min=8, max=2048, advanced=True),
+    _s("vgpu_bench_repeats", "Benchmark warm runs", "vgpu", "int", 3, min=1, max=10, advanced=True),
+    _s("vgpu_perf_log", "Write a performance log", "vgpu", "bool", True,
+       "Structured JSON lines in the Duckstoken data folder (size-limited, local only, never uploaded)."),
+    _s("vgpu_cache_dir", "Fast-drive staging cache folder", "vgpu", "path", "",
+       "Optional. A folder on your SSD: Duckstoken can copy a model from a slow hard drive here (after you confirm) so paging reads from the SSD.",
+       kind="dir"),
+    _s("vgpu_cache_gb", "Staging cache size limit (GB, 0 = off)", "vgpu", "float", 0.0, min=0, max=100000),
+    _s("vgpu_cache_min_free_gb", "Keep this much free on the cache drive (GB)", "vgpu", "float", 10.0, min=1, max=10000,
+       advanced=True),
+    _s("vgpu_prewarm", "Read the model into the OS file cache before starting", "vgpu", "select", "off",
+       "Sequential read converts slow random disk faults into one fast pass. Only helps if the model fits in free RAM.",
+       options=["off", "before_start"]),
+    _s("vgpu_prewarm_max_gb", "Prewarm at most (GB, 0 = as much as fits)", "vgpu", "float", 0.0, min=0, max=100000,
+       advanced=True),
+    _s("server_auto_restart", "Restart the model server if it crashes", "vgpu", "bool", False,
+       "Retries with a safer configuration (smaller context, less GPU) and gives up after the limit below."),
+    _s("server_restart_max", "Crash restarts before giving up", "vgpu", "int", 2, min=1, max=10, advanced=True),
+
+    # ------------------------------------------------------------------ engine
+    _s("engine", "Inference engine", "engine", "select", "llamacpp",
+       "llamacpp = the bundled llama.cpp engine (fast, runs huge models). external = Ollama / LM Studio / any "
+       "OpenAI-compatible server you already run. builtin = Duckstoken's own pure-Python engine (small models only).",
+       options=["llamacpp", "external", "builtin"]),
+    _s("external_preset", "External server", "engine", "select", "ollama", options=["ollama", "lmstudio", "custom"],
+       help="Where the external engine listens. Ollama: 11434, LM Studio: 1234."),
+    _s("external_url", "Custom server URL", "engine", "str", "http://127.0.0.1:8000",
+       "Used when the preset is 'custom'. Must speak the OpenAI /v1 API."),
+    _s("external_api_key", "External API key", "engine", "password", "", "Only if the server requires one."),
+    _s("external_model", "External model name", "engine", "str", "",
+       "Leave empty to use the first model the server reports."),
+    _s("builtin_threads", "Built-in engine threads (0 = auto)", "engine", "int", 0, min=0, max=256, advanced=True),
+
+    # --------------------------------------------------------------------- app
+    _s("window_mode", "Open Duckstoken in", "app", "select", "native",
+       "native = its own window (needs WebView2, preinstalled on Windows 11). browser = your default web browser.",
+       options=["native", "browser"]),
+    _s("minimize_to_tray", "Keep running in the system tray when the window is closed", "app", "bool", True,
+       "The model server keeps running. Right-click the tray icon to quit."),
+    _s("start_minimized", "Start hidden in the tray", "app", "bool", False),
+    _s("launch_at_startup", "Start Duckstoken when I sign in to Windows", "app", "bool", False),
+    _s("update_channel", "Update channel", "app", "select", "stable",
+       "stable = tagged releases. latest = every build of the main branch. off = never check.",
+       options=["off", "stable", "latest"]),
+    _s("update_auto_install", "Install updates automatically on exit", "app", "bool", False,
+       "Off: you are asked first. Updates are verified against a published SHA-256 before being applied."),
 ]
 
 SCHEMA_BY_KEY = {s["key"]: s for s in SCHEMA}
@@ -320,6 +405,34 @@ def coerce(spec: dict, value: Any) -> Any:
     if "max" in spec:
         v = min(spec["max"], v)
     return v
+
+
+# Settings that decide what runs on the PC or where data goes. Importing a settings file or loading a profile that changes
+# any of them (or any "pc" tool switch, or any danger-flagged switch away from its default) must be confirmed by the user:
+# otherwise a settings file shared as "my best settings" could switch off every approval prompt.
+PRIVILEGED = {"llama_server_path", "extra_args", "lora_path", "llama_dir", "models_dir", "searxng_url", "external_url", "host",
+              "big_model_path", "vgpu_cache_dir", "update_channel", "update_auto_install", "launch_at_startup"}
+
+
+def risky_changes(current: dict, patch: dict) -> list[dict]:
+    """The entries of `patch` that need an explicit confirmation before they are applied: [{key, label, from, to}]."""
+    out = []
+    for k, v in patch.items():
+        spec = SCHEMA_BY_KEY.get(k)
+        if spec is None:
+            continue
+        try:
+            new = coerce(spec, v)
+        except ValueError:
+            continue
+        old = current.get(k, spec["default"])
+        if new == old:
+            continue
+        away_from_default = new != spec["default"]
+        if k in PRIVILEGED or spec["group"] == "pc" and away_from_default or spec.get("danger") and away_from_default:
+            out.append({"key": k, "label": spec["label"], "from": "" if spec["type"] == "password" else old,
+                        "to": "(hidden)" if spec["type"] == "password" else new})
+    return out
 
 
 def validate_patch(patch: dict) -> dict:

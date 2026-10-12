@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import weakref
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -108,7 +109,7 @@ class Database:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._local = threading.local()
         self._write_lock = threading.RLock()
-        self._connections: list[sqlite3.Connection] = []
+        self._connections: list[tuple[weakref.ref, sqlite3.Connection]] = []  # (owning thread, its connection)
         self.has_fts = False
         self._init()
 
@@ -125,13 +126,29 @@ class Database:
         if c is None:
             c = self._local.c = self._connect()
             with self._write_lock:
-                self._connections.append(c)
+                self._prune_dead_threads()
+                self._connections.append((weakref.ref(threading.current_thread()), c))
         return c
+
+    def _prune_dead_threads(self) -> None:
+        """The HTTP server runs every request on a new thread; close the connections of threads that have ended so
+        they do not pile up (each holds file handles and ~300 KB). Caller holds the write lock."""
+        alive = []
+        for ref, c in self._connections:
+            t = ref()
+            if t is not None and t.is_alive():
+                alive.append((ref, c))
+                continue
+            try:
+                c.close()
+            except sqlite3.Error:
+                pass
+        self._connections[:] = alive
 
     def close(self) -> None:
         """Close every connection (all threads). Windows cannot delete a database file that is still open."""
         with self._write_lock:
-            for c in self._connections:
+            for _, c in self._connections:
                 try:
                     c.close()
                 except sqlite3.Error:

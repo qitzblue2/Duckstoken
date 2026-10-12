@@ -105,4 +105,18 @@ def summarize(path: str | Path) -> dict:
         "expert_used_count": int(g("expert_used_count")),
         "is_moe": experts > 1,
         "file_type": meta.get("general.file_type"),
+        # additive keys used by the VirtualGPU planner (0 / None when the file does not state them)
+        "feed_forward_length": int(g("feed_forward_length")),
+        "expert_feed_forward_length": int(g("expert_feed_forward_length")),
+        "key_length": int(g("attention.key_length")),
+        "value_length": int(g("attention.value_length")),
+        "sliding_window": int(g("attention.sliding_window")),
+        "vocab_size": int(g("vocab_size")),
+        "file_type_name": _file_type_name(meta.get("general.file_type")),
     }
+
+
+def _file_type_name(file_type) -> str | None:
+    """Name of a general.file_type value (e.g. 38 -> 'MXFP4_MOE'); None when missing or unknown."""
+    from .vgpu.quant import ftype_name
+    return ftype_name(file_type)

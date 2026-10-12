@@ -20,7 +20,7 @@ def complete(server, messages: list[dict], *, max_tokens: int = 512, temperature
     status = server.status()
     if status["state"] != "ready":
         raise LLMError(f"model server is {status['state']}, not ready")
-    payload = {"model": "local", "messages": messages, "stream": False, "temperature": temperature,
+    payload = {"model": getattr(server, "model_name", lambda: "local")(), "messages": messages, "stream": False, "temperature": temperature,
                "max_tokens": max_tokens, "chat_template_kwargs": {"reasoning_effort": effort}}
     payload.update(extra or {})
     req = urllib.request.Request(server.base_url() + "/v1/chat/completions", data=json.dumps(payload).encode(),

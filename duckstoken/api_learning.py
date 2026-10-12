@@ -185,6 +185,11 @@ class LearningApi:
     def api_feedback_delete(self, q, b):
         return {"ok": APP.exchanges.delete(_need(b, "id", int))}
 
+    @post
+    def api_feedback_delete_chat(self, q, b):
+        """The chat was deleted in the UI: remove what was logged from it (answers, queued jobs, training examples)."""
+        return APP.exchanges.purge_chat(_need(b, "chat_id", str))
+
     # ------------------------------------------------------------------- queue
     def _enqueue(self, exchange: dict, reason: str, cfg: dict):
         full = APP.exchanges.get(exchange["id"], include_messages=True)

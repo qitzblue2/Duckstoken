@@ -24,6 +24,8 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_GET(self):
+        if self.path == "/v1/models":
+            return self._j(200, {"data": [{"id": "fake-model"}, {"id": "fake-embed"}]})
         if self.path == "/health":
             return self._j(503 if time.time() - START < 1.5 else 200, {"status": "ok"})
         self._j(404, {})
@@ -50,7 +52,8 @@ class H(BaseHTTPRequestHandler):
         else:
             for part in ["thinking ", "hard"]:
                 emit({"reasoning_content": part})
-            for part in ["Hello ", "from **fake** ", f"model (effort={body.get('chat_template_kwargs', {}).get('reasoning_effort')}, tools={len(body.get('tools') or [])}, msgs={len(msgs)})"]:
+            system = msgs[0]["content"] if msgs[0]["role"] == "system" else ""
+            for part in ["Hello ", "from **fake** ", f"model (effort={body.get('chat_template_kwargs', {}).get('reasoning_effort')}, tools={len(body.get('tools') or [])}, msgs={len(msgs)}, name={body.get('model')}, sys={system!r})"]:
                 emit({"content": part})
                 time.sleep(0.05)
         emit({}, timings={"predicted_n": 5, "predicted_per_second": 4.2, "prompt_per_second": 99.0})

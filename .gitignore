@@ -7,3 +7,7 @@ dist/
 .venv/
 *.gguf
 *.part
+dist-installer/
+engine/
+engine_dl/
+release/

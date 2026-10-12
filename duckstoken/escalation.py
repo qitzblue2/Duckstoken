@@ -486,7 +486,8 @@ class EscalationWorker:
     def _bring_up_big(self, cfg: dict) -> None:
         if self._stop.is_set():
             raise RuntimeError("Duckstoken is shutting down")
-        if cfg.get("big_swap_models") and self._active(self.small_server):
+        if (cfg.get("big_swap_models") and getattr(self.small_server, "swappable", True)
+                and self._active(self.small_server)):
             self._set_phase("swapping")
             self.small_server.stop()
             self._small_was_stopped = True
