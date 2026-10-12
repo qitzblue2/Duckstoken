@@ -424,6 +424,12 @@ def _process_windows(pid: int) -> dict:
         return _proc_unavailable("process not found or access denied")
     out = {}
     try:
+        # A handle to a process that has exited stays valid while anyone holds it (our own Popen object does), and the memory
+        # counters then still answer: only STILL_ACTIVE (259) means there is something to measure.
+        k32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        code = wintypes.DWORD()
+        if k32.GetExitCodeProcess(h, ctypes.byref(code)) and code.value != 259:
+            return _proc_unavailable("the process has exited")
         class PMC(ctypes.Structure):
             _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [(n, ctypes.c_size_t) for n in (
                 "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",

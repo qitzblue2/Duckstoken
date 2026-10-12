@@ -124,15 +124,21 @@ class StagingCache:
 
     @staticmethod
     def _disk_for(path: str, hw: dict) -> dict | None:
+        """The drive entry of `hw["disks"]` that contains `path`: the longest matching drive letter or mount point."""
         disks = (hw or {}).get("disks") or []
-        if os.name == "nt":
-            return hardware.disk_for_path(path, disks)
-        norm, best = os.path.normcase(os.path.realpath(path)), None
+        norm, best, best_len = os.path.normcase(os.path.realpath(path)), None, -1
         for d in disks:
             mount = str(d.get("drive") or "")
-            if mount and (mount == "/" or norm == mount or norm.startswith(mount.rstrip("/") + "/")):
-                if best is None or len(mount) > len(str(best["drive"])):
-                    best = d
+            if not mount:
+                continue
+            m = os.path.normcase(mount)
+            if len(m) == 2 and m[1] == ":":                 # a bare Windows drive letter such as "D:"
+                hit = norm.startswith(m)
+            else:
+                m = os.path.normcase(os.path.realpath(mount)).rstrip("\\/") or os.sep
+                hit = m == os.sep or norm == m or norm.startswith(m + os.sep)
+            if hit and len(m) > best_len:
+                best, best_len = d, len(m)
         return best
 
     def _current(self, name: str, entry: dict) -> bool:

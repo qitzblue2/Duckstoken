@@ -145,13 +145,16 @@ class TestSuccessfulRun(BenchCase):
             self.assertEqual(run["ttft_s"]["status"], "measured")        # a stopwatch reading is still measured
         self.assertEqual(r["warm"]["gen_tps"]["status"], "estimated")
         gen = r["warm"]["gen_tps"]["value"]
-        self.assertTrue(150 < gen < 450, gen)       # roughly the simulated 400 tokens/s, client side
+        # roughly the simulated 400 tokens/s, client side. Windows sleeps in ~15 ms steps, so the simulated 2.5 ms/token is
+        # really ~15 ms there and the measured speed is far lower; the label is what this test is about.
+        self.assertTrue((20 if os.name == "nt" else 150) < gen < 450, gen)
 
     def test_falls_back_to_chat_endpoint_on_older_servers(self):
         r = self.bench("--fake-load-s 0.05 --fake-chat-only")
         self.assertEqual(r["status"], "ok", r["error"])
         self.assertTrue(all(x["endpoint"] == "/v1/chat/completions" for x in [r["cold"], *r["warm"]["runs"]]))
 
+    @unittest.skipIf(os.name == "nt", "tests/fake_llama_server.py is a shebang script and cannot be launched directly on Windows")
     def test_old_test_server_that_drops_the_connection_also_falls_back(self):
         old = K.ROOT / "tests" / "fake_llama_server.py"
         self.patch_modules(probe=None)
@@ -166,7 +169,7 @@ class TestSuccessfulRun(BenchCase):
         self.assertEqual(r["backend"]["engine"], "llama.cpp")
         self.assertEqual((r["backend"]["version"], r["backend"]["build"]), ("9999", 9999))
         self.assertEqual(r["backend"]["probe"], "ok")
-        self.assertTrue(r["backend"]["path"].endswith("llama-server"))
+        self.assertEqual(Path(r["backend"]["path"]).stem, "llama-server")   # llama-server.cmd on Windows
 
     def test_real_probe_on_the_fake_executable(self):
         from duckstoken.vgpu import probe as real_probe

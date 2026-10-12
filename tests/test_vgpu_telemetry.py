@@ -249,6 +249,7 @@ class SystemSampleTests(unittest.TestCase):
 class WindowsBranchTests(unittest.TestCase):
     """The Win32 calls cannot run here; forcing the branch proves failures degrade to 'unavailable', not exceptions."""
 
+    @unittest.skipIf(os.name == "nt", "on a real Windows machine windll exists; see RealWindowsTests")
     def test_windows_branch_without_windll_never_raises(self):
         old = t._IS_WIN
         t._IS_WIN = True
@@ -328,6 +329,36 @@ class ProcessSampleTests(unittest.TestCase):
             child.kill()
             child.wait()
         self.assertEqual(t.process_sample(child.pid)["rss_gb"]["status"], "unavailable")
+
+
+@unittest.skipUnless(os.name == "nt", "calls the real Win32 API")
+class RealWindowsTests(unittest.TestCase):
+    """Runs only on Windows (CI's windows-latest): the ctypes struct layouts and signatures are exercised for real."""
+
+    def test_memory_and_process_counters_are_measured(self):
+        t._reset_state()
+        s = t.system_sample(gpu=False)
+        self.assertEqual(s["ram"]["total_gb"]["status"], "measured")
+        self.assertGreater(s["ram"]["total_gb"]["value"], 1)
+        self.assertEqual(s["ram"]["avail_gb"]["status"], "measured")
+        self.assertLessEqual(s["ram"]["avail_gb"]["value"], s["ram"]["total_gb"]["value"])
+        p = t.process_sample(os.getpid())
+        self.assertEqual(p["rss_gb"]["status"], "measured")
+        self.assertGreater(p["rss_gb"]["value"], 0)
+        self.assertGreaterEqual(p["peak_rss_gb"]["value"], p["rss_gb"]["value"])
+        self.assertEqual(p["cpu_seconds"]["status"], "measured")
+        self.assertEqual(p["io_read_gb"]["status"], "measured")
+
+    def test_cpu_utilisation_needs_two_samples_then_is_measured(self):
+        t._reset_state()
+        first = t.system_sample(gpu=False)
+        self.assertEqual(first["cpu"]["util_pct"]["status"], "unavailable")   # one reading is not a rate
+        x = 0
+        for i in range(2_000_000):
+            x += i
+        second = t.system_sample(gpu=False)
+        self.assertEqual(second["cpu"]["util_pct"]["status"], "measured")
+        self.assertTrue(0 <= second["cpu"]["util_pct"]["value"] <= 100)
 
 
 class BandwidthTests(unittest.TestCase):

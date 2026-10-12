@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import gguf, hardware, settings as settings_mod
-from ..server_proc import ServerManager, find_llama_server
+from ..server_proc import ServerManager, find_llama_server, terminate_tree
 from . import bench_client as bc
 from .bench_client import summarize_runs  # noqa: F401 - part of this module's API
 from .bench_compare import compare_benchmarks, compare_plan, plan_summary  # noqa: F401 - re-exported
@@ -395,16 +395,9 @@ class _Bench:
             return                  # nothing was started here (rejected, cancelled early, or the start failed)
         if proc.poll() is None:
             try:
-                proc.terminate()
-                proc.wait(self.grace)
+                terminate_tree(proc, self.grace)   # the whole tree: on Windows a launcher script would otherwise outlive us
             except Exception:  # noqa: BLE001
                 pass
-            if proc.poll() is None:
-                try:
-                    proc.kill()
-                    proc.wait(10)
-                except Exception:  # noqa: BLE001
-                    pass
         try:
             server.stop()
         except Exception:  # noqa: BLE001

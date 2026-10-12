@@ -69,6 +69,33 @@ def _bind_lifetime(proc: subprocess.Popen) -> None:
         pass
 
 
+def terminate_tree(proc: subprocess.Popen, grace: float = 8.0) -> None:
+    """Stop `proc` and everything it started, escalating to kill after `grace` seconds.
+
+    On Windows `terminate()` ends only the direct child, so a launcher script (a .bat/.cmd given as the engine) would leave
+    llama-server running with the model still in memory; `taskkill /T` takes the whole tree.
+    """
+    if proc.poll() is not None:
+        return
+    killed_tree = False
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=15, creationflags=0x08000000)
+            killed_tree = True
+        except (OSError, subprocess.SubprocessError):
+            pass
+    if not killed_tree:
+        proc.terminate()
+    try:
+        proc.wait(grace)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def find_llama_server(s: dict) -> Path | None:
     """The configured llama-server, else the one bundled in the app."""
     configured = s.get("llama_server_path", "")
@@ -227,11 +254,7 @@ class ServerManager:
             proc, self.proc = self.proc, None
             self.state = "stopped"
         if proc and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+            terminate_tree(proc, 8)
 
     def status(self) -> dict:
         with self._lock:
