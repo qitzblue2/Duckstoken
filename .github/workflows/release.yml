@@ -43,13 +43,13 @@ jobs:
         shell: pwsh
         run: |
           $out = "$env:RUNNER_TEMP\selftest-portable.json"
-          $p = Start-Process -FilePath dist\Duckstoken.exe -ArgumentList "--selftest",$out -Wait -PassThru
+          $p = Start-Process -FilePath (Resolve-Path dist\Duckstoken.exe).Path -ArgumentList "--selftest",$out -Wait -PassThru
           if (Test-Path $out) { Get-Content $out } else { Write-Warning "the exe wrote no report" }
           if ($p.ExitCode -ne 0) { throw "portable exe self-test failed (see the report above)" }
       - name: Smoke test portable exe
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath dist\Duckstoken.exe -ArgumentList "--headless","--port","18999","--data-dir","$env:RUNNER_TEMP\duck1" -PassThru
+          $p = Start-Process -FilePath (Resolve-Path dist\Duckstoken.exe).Path -ArgumentList "--headless","--port","18999","--data-dir","$env:RUNNER_TEMP\duck1" -PassThru
           $ok = $false
           foreach ($i in 1..40) {
             Start-Sleep -Seconds 3
@@ -74,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $dir = "$env:RUNNER_TEMP\inst"
-          Start-Process -FilePath dist-installer\Duckstoken-Setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dir" -Wait
+          Start-Process -FilePath (Resolve-Path dist-installer\Duckstoken-Setup.exe).Path -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dir" -Wait
           if (-not (Test-Path "$dir\Duckstoken.exe")) { throw "installer did not install the app" }
           if (-not (Test-Path "$dir\_internal\engine\llama-server.exe")) { throw "engine is missing from the installed app" }
           $out = "$env:RUNNER_TEMP\selftest-installed.json"

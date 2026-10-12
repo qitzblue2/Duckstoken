@@ -463,6 +463,8 @@ class Handler(VGpuApi, SystemApi, LearningApi, BaseHTTPRequestHandler):
             data = downloads.list_llama_assets(backend)
         except urllib.error.URLError as e:
             raise ApiError(f"Cannot reach GitHub: {e}") from e
+        except LookupError as e:
+            raise ApiError(str(e), 502) from e
         data["backend"] = backend
         return data
 

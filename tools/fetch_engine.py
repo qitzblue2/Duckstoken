@@ -1,4 +1,4 @@
-"""Download the latest official llama.cpp Windows CPU build and unpack it into ./engine for bundling.
+"""Download the newest complete official llama.cpp Windows CPU build and unpack it into ./engine for bundling.
 
 Run by the release workflow (and build_windows.bat). Only llama-server.exe and the DLLs it needs are kept.
 Verifies the archive against GitHub's published SHA-256 digest when the API provides one.
@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from duckstoken import downloads  # noqa: E402
 
-API = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
+API = downloads.LLAMA_RELEASES
 
 
 def _get(url: str, accept: str | None = None):
@@ -31,15 +31,13 @@ def _get(url: str, accept: str | None = None):
     return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120)
 
 
-def pick_asset(release: dict, backend: str = "cpu") -> dict:
-    assets = [{"name": a["name"], "url": a["browser_download_url"], "size": a["size"], "digest": a.get("digest") or ""}
-              for a in release.get("assets", []) if a["name"].endswith(".zip")]
-    win = [a for a in assets if "win" in a["name"].lower() and "x64" in a["name"].lower()
-           and "arm" not in a["name"].lower()]
-    picked = downloads.pick_assets(win, backend)
-    if not picked:
-        raise SystemExit(f"No Windows {backend} build found among: {[a['name'] for a in win]}")
-    return picked[0]
+def pick_asset(releases: list[dict], backend: str = "cpu") -> tuple[dict, dict]:
+    """(release, asset) from the newest release that is fully uploaded - see downloads.choose_llama_release."""
+    try:
+        release, _win, picked = downloads.choose_llama_release(releases, backend)
+    except LookupError as e:
+        raise SystemExit(str(e)) from e
+    return release, picked[0]
 
 
 def keep_only_server(folder: Path) -> list[str]:
@@ -59,8 +57,8 @@ def main() -> None:
     a = ap.parse_args()
 
     with _get(API, "application/vnd.github+json") as r:
-        release = json.load(r)
-    asset = pick_asset(release, a.backend)
+        releases = json.load(r)
+    release, asset = pick_asset(releases, a.backend)
     print(f"llama.cpp {release.get('tag_name')}: {asset['name']} ({asset['size'] / 2**20:.1f} MB)")
 
     out = Path(a.out)
