@@ -1,9 +1,15 @@
 # 🦆 Duckstoken
 
-**Run big local LLMs — like `gpt-oss-120b` — on a modest Windows PC.**
-Duckstoken is a one-file Windows app (no installer, no dependencies) that downloads
-[llama.cpp](https://github.com/ggml-org/llama.cpp) and your model, **tunes ~85 settings for your hardware**,
-starts the model server, and gives you a chat UI — with optional, heavily-guarded tools that let the AI work on your PC.
+**Run big local LLMs — like `gpt-oss-120b` — on a modest Windows PC, and keep them useful.**
+Duckstoken is a Windows app (installer or single portable `.exe`, with [llama.cpp](https://github.com/ggml-org/llama.cpp)
+bundled inside) that tunes ~160 settings for your hardware, checks *before* loading whether a model can really run,
+starts the model server, measures what your PC actually achieves, and gives you a chat UI — with optional, heavily-guarded
+tools that let the AI work on your PC. You can also point it at Ollama / LM Studio instead, or use its own small built-in engine.
+
+> **Honest by design.** Software cannot turn RAM into VRAM or invent GPU compute. Duckstoken coordinates the memory tiers
+> you actually have (VRAM, RAM, memory-mapped storage, an optional fast-drive cache), says what it measured versus what it
+> estimated, and says "Unavailable" when it cannot know. See [docs/FEATURES.md](docs/FEATURES.md) for what is implemented, tested,
+> experimental or impossible.
 
 ## What it does
 
@@ -13,9 +19,28 @@ starts the model server, and gives you a chat UI — with optional, heavily-guar
 | **"Can my PC run this?"** | Reads the model's GGUF header and tells you honestly how fast (or slow) it will be — and warns when a model would be unusable on your drive |
 | **One-click auto-tune** | Picks threads, context, MoE-expert placement (`--n-cpu-moe`), KV-cache quantization, batch sizes… for *your* machine |
 | **Downloader** | Hugging Face GGUFs (resumable, multi-part) and the latest official llama.cpp Windows build (CPU / CUDA / Vulkan) |
-| **85+ settings** | Every important llama-server option + sampling + reasoning effort, with presets, saved profiles, search, import/export, per-setting reset |
+| **160+ settings** | Every important llama-server option + sampling + reasoning effort, with presets, saved profiles, search, import/export, per-setting reset |
 | **Chat UI** | Streaming, gpt-oss reasoning view, tokens/s readout, tool calling, chat history, export |
 | **PC access (opt-in)** | List/read/find/write files, run PowerShell commands, fetch URLs, system info — per-tool switches, folder allow-list or *Full PC access*, approval prompts, protected folders, audit log |
+
+## Virtual GPU: memory manager, optimizer and diagnostics
+
+The **Virtual GPU** page (Memory · Optimizer · Diagnostics · GPT-OSS 120B) is Duckstoken's memory and performance layer:
+
+| | |
+|---|---|
+| **Memory tiers** | VRAM, system RAM, memory-mapped storage and an optional disk cache are shown *separately* — 8 GB of VRAM plus 32 GB of RAM is never presented as 40 GB of VRAM. Live RAM/CPU/GPU/process telemetry with honest `measured` / `estimated` / `unavailable` labels. |
+| **“Will it fit?” planner** | Weights, KV cache, compute buffers, OS reserve and a safety margin for any model and context, on your hardware or a **what-if machine** (16 GB laptop, your own PC with more RAM…). Every assumption is listed. Admission verdicts: fits · tight · pages from disk · cannot load — and **▶ Start refuses an impossible load** (you can still force it). |
+| **Optimizer + benchmarks** | Measures a CPU-only baseline and a few safe variants (KV type, micro-batch, and GPU offload only if the engine reports a usable GPU) with the same prompt and seed; prompt-processing and generation speed are reported separately, cold vs warm, plus peak RAM/VRAM and page faults. Pick *largest usable model*, *max speed* or *balanced*; nothing is applied until you confirm, and it can be undone. Results are saved and flagged **stale** when your hardware, model or engine changes. |
+| **Storage tier** | *Prewarm* reads the model sequentially into the OS file cache (bounded by free RAM); an optional *staging cache* copies a model from a slow drive to your SSD after you confirm. |
+| **Crash recovery** | Opt-in: if the model server dies (out of VRAM/RAM) it restarts with a safer configuration. Critical memory pressure can unload the big model or stop the server instead of freezing the PC. |
+| **Diagnostics** | Hardware, a compatibility table (supported / unsupported / experimental / unknown — nothing is “supported” without evidence), engine probe, failed estimates, logs and a copyable report with secrets redacted. |
+| **GPT-OSS 120B report** | Whether gpt-oss-120b/20b is realistic on your RAM, drive and GPU, with a RAM planning table (16 → 128 GB). It never downloads the 63 GB file without confirmation. |
+
+What llama.cpp does **not** expose — expert routing statistics, per-expert residency, GPU weight prefetch, a transfer-bandwidth probe — is
+listed as unavailable in the app rather than faked; the substitutes are static MoE placement (`--n-cpu-moe`) and storage-level prewarm.
+Docs: [architecture](docs/ARCHITECTURE.md) · [compatibility matrix](docs/COMPATIBILITY.md) · [feature status](docs/FEATURES.md) ·
+[benchmark report](docs/BENCHMARKS.md) · [GPT-OSS 120B feasibility](docs/GPT_OSS_120B.md).
 
 ## Learning: make the AI better for *you*
 
@@ -65,17 +90,22 @@ From source: `python -m duckstoken` (Python 3.10+; the standard library is enoug
 
 ## Running `gpt-oss-120b` on 48 GB RAM, an i7-8700K and a GTX 750
 
-It works — slowly — **if the model lives on an SSD**:
+It works — slowly — **if the model lives on an SSD** (the numbers below are the planner's estimates; see
+[docs/GPT_OSS_120B.md](docs/GPT_OSS_120B.md) for the arithmetic and **Virtual GPU → GPT-OSS 120B** for your own machine):
 
-* The 120B model is ~59 GB; you have ~42 GB of usable RAM, so ~15 GB is read from disk *while generating*
-  (llama.cpp memory-maps the file, and the model is a Mixture-of-Experts that only touches ~4 of 128 experts per token).
-* **Store it on the 256 GB M.2.** It fits (59 GB). Expect roughly **0.5–2 tokens/s** on NVMe, less on a SATA SSD.
-  On a **hard drive it is unusable** (minutes per word) — Duckstoken detects this and warns you.
-* `gpt-oss-20b` (11 GB) fits entirely in RAM → **~4–7 tokens/s** on that CPU. Best for daily use.
-* The GTX 750 (1–2 GB VRAM, Maxwell) helps very little; auto-tune uses the CPU backend by default. If you want to try the GPU anyway, pick the Vulkan or CUDA 12.x build.
+* The 120B model is ≈ 59 GiB; after the 6 GB Duckstoken keeps free for Windows you have ~42 GB of usable RAM, so ≈ 20 GB (a third of the
+  weights) is read from disk *while generating*. llama.cpp memory-maps the file, and the model is a Mixture-of-Experts that only touches
+  4 of 128 experts per token, which is why this works at all.
+* **Store it on the 256 GB M.2.** Expect roughly **0.6–1.4 tokens/s** on NVMe, less on a SATA SSD.
+  On a **hard drive it is unusable** (minutes per word) — the planner refuses it unless you force the load.
+* `gpt-oss-20b` (≈ 11 GiB) fits entirely in RAM → about **4.7–9.4 tokens/s** (estimate) on that CPU. Best for daily use.
+* The GTX 750 (1–2 GB VRAM, Maxwell) can hold only the attention weights and helps very little; auto-tune uses the CPU. If you want to try
+  the GPU anyway, install a CUDA **12.x** build (CUDA 13 builds dropped Maxwell) or Vulkan, and let the Optimizer measure whether it helps.
 * Turn on **XMP/DOCP** in BIOS and use both memory channels: generation speed is memory-bandwidth bound.
+* 64 GB of RAM would nearly remove the paging; 96–128 GB keeps the whole model resident.
 
-> The speed numbers are estimates from a simple model of RAM/disk bandwidth. The chat footer shows your **real** tokens/s.
+> These are estimates from published model facts and a memory-bandwidth model, not measurements of your PC. The Dashboard shows the
+> measured speed of your last reply, and the Optimizer benchmarks properly.
 
 ## PC access — read this before enabling
 
@@ -105,11 +135,12 @@ update the rolling **Latest build** release; pushing a tag such as `v0.2.0` publ
 ## Development
 
 ```bash
-python -m unittest discover -s tests -v   # backend, tools, security, fake llama-server lifecycle
+python -m unittest discover -s tests -v   # ~1600 tests: backend, learning, engines, Virtual GPU, HTTP API, fake and (opt-in) real llama-server
 python -m duckstoken --no-browser         # then open the printed URL
 ```
 
 Layout: `duckstoken/settings.py` (schema = single source of truth for CLI flags *and* the UI),
-`hardware.py`, `gguf.py`, `tuner.py`, `downloads.py`, `server_proc.py`, `tools.py`, `app.py`, `web/`.
+`hardware.py`, `gguf.py`, `tuner.py`, `downloads.py`, `server_proc.py`, `tools.py`, `app.py`, `vgpu/` (planner, telemetry, benchmark, optimizer, caches), `engines/`, `web/`.
+Design notes: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 MIT licensed. Not affiliated with OpenAI or the llama.cpp project.
