@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import gc
 import mmap
+import os
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -18,6 +20,7 @@ MAX_STRING = 1 << 26        # bytes; a chat template or one token is far smaller
 MAX_ENTRIES = 1 << 20       # metadata keys / tensors we are willing to parse
 MAX_ARRAY_DEPTH = 2
 _CHUNK_ELEMENTS = 1 << 22   # dequantize this many elements at a time to bound temporary memory
+_WORKERS = min(4, os.cpu_count() or 1)
 
 
 class UnsupportedModel(Exception):
@@ -44,7 +47,7 @@ class TensorInfo(NamedTuple):
 
 
 # ------------------------------------------------------------------------------------------------ dequantizers
-# Each takes `blocks`, a (n_blocks, block_bytes) uint8 array, and returns a (n_blocks, block_elements) float32 array.
+# Each takes `blocks`, a (n_blocks, block_bytes) uint8 array, and fills `out`, a C-contiguous (n_blocks, block_elements) float32 array.
 
 def _f16(blocks, at: int):
     """The little-endian float16 stored at byte `at` of every block, as a float32 column."""
@@ -58,20 +61,16 @@ def _nibbles(qs, out) -> None:
     out[:, w:] = qs >> 4
 
 
-def _q4_0(b):
-    out = np.empty((len(b), 32), np.float32)
+def _q4_0(b, out):
     _nibbles(b[:, 2:], out)
     out -= 8
     out *= _f16(b, 0)
-    return out
 
 
-def _q4_1(b):
-    out = np.empty((len(b), 32), np.float32)
+def _q4_1(b, out):
     _nibbles(b[:, 4:], out)
     out *= _f16(b, 0)
     out += _f16(b, 2)
-    return out
 
 
 def _q5_high_bits(b):
@@ -79,28 +78,22 @@ def _q5_high_bits(b):
     return np.unpackbits(np.ascontiguousarray(b[:, :4]), axis=1, bitorder="little") << 4
 
 
-def _q5_0(b):
-    out = np.empty((len(b), 32), np.float32)
+def _q5_0(b, out):
     _nibbles(b[:, 6:], out)
     out += _q5_high_bits(b[:, 2:])
     out -= 16
     out *= _f16(b, 0)
-    return out
 
 
-def _q5_1(b):
-    out = np.empty((len(b), 32), np.float32)
+def _q5_1(b, out):
     _nibbles(b[:, 8:], out)
     out += _q5_high_bits(b[:, 4:])
     out *= _f16(b, 0)
     out += _f16(b, 2)
-    return out
 
 
-def _q8_0(b):
-    out = b[:, 2:].view(np.int8).astype(np.float32)
-    out *= _f16(b, 0)
-    return out
+def _q8_0(b, out):
+    np.multiply(b[:, 2:].view(np.int8), _f16(b, 0), out=out)
 
 
 def _scale_min_k4(sc):
@@ -114,50 +107,47 @@ def _scale_min_k4(sc):
     return scales, mins
 
 
-def _q4_k(b):
+def _q4_k(b, out):
     n = len(b)
     scales, mins = _scale_min_k4(b[:, 4:16])
     d = _f16(b, 0) * scales
     m = _f16(b, 2) * mins
     qs = b[:, 16:].reshape(n, 4, 32)
-    out = np.empty((n, 8, 32), np.float32)
-    out[:, 0::2] = qs & 15
-    out[:, 1::2] = qs >> 4
-    out *= d[:, :, None]
-    out -= m[:, :, None]
-    return out.reshape(n, 256)
+    o = out.reshape(n, 8, 32)
+    o[:, 0::2] = qs & 15
+    o[:, 1::2] = qs >> 4
+    o *= d[:, :, None]
+    o -= m[:, :, None]
 
 
-def _q5_k(b):
+def _q5_k(b, out):
     n = len(b)
     scales, mins = _scale_min_k4(b[:, 4:16])
     d = _f16(b, 0) * scales
     m = _f16(b, 2) * mins
     qh = b[:, 16:48]
     qs = b[:, 48:].reshape(n, 4, 32)
-    out = np.empty((n, 8, 32), np.float32)
-    out[:, 0::2] = qs & 15
-    out[:, 1::2] = qs >> 4
-    out += ((qh[:, None, :] >> np.arange(8, dtype=np.uint8)[None, :, None]) & 1) << 4
-    out *= d[:, :, None]
-    out -= m[:, :, None]
-    return out.reshape(n, 256)
+    o = out.reshape(n, 8, 32)
+    o[:, 0::2] = qs & 15
+    o[:, 1::2] = qs >> 4
+    o += ((qh[:, None, :] >> np.arange(8, dtype=np.uint8)[None, :, None]) & 1) << 4
+    o *= d[:, :, None]
+    o -= m[:, :, None]
 
 
-def _q6_k(b):
+def _q6_k(b, out):
     n = len(b)
     ql = b[:, :128].reshape(n, 2, 2, 32)
     qh = b[:, 128:192].reshape(n, 2, 32)
     sc = b[:, 192:208].view(np.int8).astype(np.float32) * _f16(b, 208)
-    out = np.empty((n, 2, 4, 32), np.float32)
-    out[:, :, 0] = (ql[:, :, 0] & 15) | ((qh & 3) << 4)
-    out[:, :, 1] = (ql[:, :, 1] & 15) | (((qh >> 2) & 3) << 4)
-    out[:, :, 2] = (ql[:, :, 0] >> 4) | (((qh >> 4) & 3) << 4)
-    out[:, :, 3] = (ql[:, :, 1] >> 4) | ((qh >> 6) << 4)
-    out -= 32
-    out = out.reshape(n, 16, 16)
-    out *= sc[:, :, None]
-    return out.reshape(n, 256)
+    o = out.reshape(n, 2, 4, 32)
+    o[:, :, 0] = (ql[:, :, 0] & 15) | ((qh & 3) << 4)
+    o[:, :, 1] = (ql[:, :, 1] & 15) | (((qh >> 2) & 3) << 4)
+    o[:, :, 2] = (ql[:, :, 0] >> 4) | (((qh >> 4) & 3) << 4)
+    o[:, :, 3] = (ql[:, :, 1] >> 4) | ((qh >> 6) << 4)
+    o -= 32
+    o = out.reshape(n, 16, 16)
+    o *= sc[:, :, None]
 
 
 def _two_bit_groups(qs):
@@ -166,18 +156,18 @@ def _two_bit_groups(qs):
     return (q >> (2 * np.arange(4, dtype=np.uint8))[None, None, :, None]) & 3
 
 
-def _q2_k(b):
+def _q2_k(b, out):
     n = len(b)
     sc = b[:, :16]
     d = _f16(b, 80) * (sc & 15)
     m = _f16(b, 82) * (sc >> 4)
-    out = _two_bit_groups(b[:, 16:80]).astype(np.float32).reshape(n, 16, 16)
-    out *= d[:, :, None]
-    out -= m[:, :, None]
-    return out.reshape(n, 256)
+    out.reshape(n, 2, 4, 32)[...] = _two_bit_groups(b[:, 16:80])
+    o = out.reshape(n, 16, 16)
+    o *= d[:, :, None]
+    o -= m[:, :, None]
 
 
-def _q3_k(b):
+def _q3_k(b, out):
     n = len(b)
     hmask = b[:, :32]
     raw = b[:, 96:108]
@@ -189,28 +179,26 @@ def _q3_k(b):
     scales[:, 12:16] = (low[:, 4:8] >> 4) | ((top >> 6) << 4)
     d = (scales.astype(np.float32) - 32) * _f16(b, 108)
     high = (hmask[:, None, None, :] >> np.arange(8, dtype=np.uint8).reshape(2, 4)[None, :, :, None]) & 1
-    out = _two_bit_groups(b[:, 32:96]).astype(np.float32)
-    out += high * 4
-    out -= 4
-    out = out.reshape(n, 16, 16)
-    out *= d[:, :, None]
-    return out.reshape(n, 256)
+    o4 = out.reshape(n, 2, 4, 32)
+    o4[...] = _two_bit_groups(b[:, 32:96])
+    o4 += high * 4
+    o4 -= 4
+    o = out.reshape(n, 16, 16)
+    o *= d[:, :, None]
 
 
 _IQ4_NL_VALUES = (-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113)
 
 
-def _iq4_nl(b):
+def _iq4_nl(b, out):
     table = np.array(_IQ4_NL_VALUES, np.float32)
-    out = np.empty((len(b), 32), np.float32)
     qs = b[:, 2:]
     out[:, :16] = table[qs & 15]
     out[:, 16:] = table[qs >> 4]
     out *= _f16(b, 0)
-    return out
 
 
-def _iq4_xs(b):
+def _iq4_xs(b, out):
     n = len(b)
     table = np.array(_IQ4_NL_VALUES, np.float32)
     high = np.ascontiguousarray(b[:, 2:4]).view("<u2")
@@ -221,21 +209,26 @@ def _iq4_xs(b):
     ls += ((high >> (2 * np.arange(8, dtype=np.uint16))[None, :]) & 3).astype(np.int16) << 4
     dl = (ls - 32) * _f16(b, 0)
     qs = b[:, 8:].reshape(n, 8, 16)
-    out = np.empty((n, 8, 32), np.float32)
-    out[:, :, :16] = table[qs & 15]
-    out[:, :, 16:] = table[qs >> 4]
-    out *= dl[:, :, None]
-    return out.reshape(n, 256)
+    o = out.reshape(n, 8, 32)
+    o[:, :, :16] = table[qs & 15]
+    o[:, :, 16:] = table[qs >> 4]
+    o *= dl[:, :, None]
+
+
+def _bfloat16_bits(x):
+    """float32 array -> uint16 array of the same values rounded to bfloat16 (round to nearest, ties to even)."""
+    bits = x.view(np.uint32)
+    return ((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16).astype(np.uint16)
 
 
 def _raw_float(dtype: str) -> Callable:
-    def dequantize(b):
-        return np.ascontiguousarray(b).view(dtype).astype(np.float32)
+    def dequantize(b, out):
+        out[...] = np.ascontiguousarray(b).view(dtype)
     return dequantize
 
 
-def _bf16(b):
-    return (np.ascontiguousarray(b).view("<u2").astype(np.uint32) << 16).view(np.float32)
+def _bf16(b, out):
+    out[...] = (np.ascontiguousarray(b).view("<u2").astype(np.uint32) << 16).view(np.float32)
 
 
 class _GType(NamedTuple):
@@ -327,8 +320,10 @@ class _Reader:
                 raise UnsupportedModel("Not a valid GGUF file: arrays nested too deeply.")
             etype, n = self.u32(), self.u64()
             if etype in _SCALARS:
-                fmt = f"<{n}{_SCALARS[etype]}"
-                return list(struct.unpack_from(fmt, self.buf, self.take(struct.calcsize(fmt))))
+                code = _SCALARS[etype]
+                if n > (self.end - self.pos) // struct.calcsize(code):
+                    raise UnsupportedModel(f"Not a valid GGUF file: {_TRUNCATED}.")
+                return list(struct.unpack_from(f"<{n}{code}", self.buf, self.take(n * struct.calcsize(code))))
             if etype == 8:
                 if n * 8 > self.end - self.pos:
                     raise UnsupportedModel(f"Not a valid GGUF file: {_TRUNCATED}.")
@@ -416,7 +411,11 @@ class GGUFFile:
 
     # ---------------------------------------------------------------------------------------------- tensors
     def load(self, name: str, dtype="float32", out=None):
-        """Read tensor `name` as a dequantized C-contiguous array (float32 or float16), optionally into the preallocated `out`."""
+        """Read tensor `name` as a dequantized C-contiguous array, optionally into the preallocated `out`.
+
+        `dtype` is "float32", or "bfloat16" for half the memory: NumPy has no bfloat16, so those arrays hold the raw 16-bit
+        patterns (uint16), i.e. the upper half of each rounded float32.
+        """
         if np is None:
             raise UnsupportedModel("NumPy is not installed.")
         if self._mm is None:
@@ -428,25 +427,69 @@ class GGUFFile:
         if layout is None or layout.dequantize is None:
             raise UnsupportedModel(f"Tensor {name!r} uses the {info.type_name} format, which the built-in engine cannot read. "
                                    f"Supported: {', '.join(SUPPORTED_TYPES)}. Use a Q8_0 or Q4_K_M file, or the llama.cpp engine.")
-        dtype = np.dtype(dtype)
-        if dtype not in (np.dtype(np.float32), np.dtype(np.float16)):
-            raise ValueError("dtype must be float32 or float16")
+        if dtype not in ("float32", "bfloat16"):
+            raise ValueError("dtype must be 'float32' or 'bfloat16'")
+        stored = np.dtype(np.float32 if dtype == "float32" else np.uint16)
         if out is None:
-            out = np.empty(info.shape, dtype)
-        elif out.shape != info.shape or out.dtype != dtype or not out.flags.c_contiguous:
-            raise ValueError(f"`out` must be a C-contiguous {dtype} array of shape {info.shape}")
+            out = np.empty(info.shape, stored)
+        elif out.shape != info.shape or out.dtype != stored or not out.flags.c_contiguous:
+            raise ValueError(f"`out` must be a C-contiguous {stored} array of shape {info.shape}")
         flat = out.reshape(-1)
         raw = np.frombuffer(self._mm, np.uint8, info.n_bytes, info.offset)
         blocks = raw.reshape(-1, layout.size)
         step = max(1, _CHUNK_ELEMENTS // layout.block)
-        chunk = None
+
+        def fill(i: int) -> None:
+            part = blocks[i:i + step]
+            target = flat[i * layout.block:(i + len(part)) * layout.block]
+            if dtype == "float32":
+                layout.dequantize(part, target.reshape(len(part), layout.block))
+            else:
+                tmp = np.empty((len(part), layout.block), np.float32)
+                layout.dequantize(part, tmp)
+                target[...] = _bfloat16_bits(tmp.reshape(-1))
+
+        starts = range(0, len(blocks), step)
         try:
-            for i in range(0, len(blocks), step):
-                chunk = layout.dequantize(blocks[i:i + step])
-                flat[i * layout.block:(i + len(chunk)) * layout.block] = chunk.reshape(-1)
+            if info.n_elements >= 2 * _CHUNK_ELEMENTS and _WORKERS > 1:  # NumPy releases the GIL, so chunks run in parallel
+                with ThreadPoolExecutor(_WORKERS) as pool:
+                    list(pool.map(fill, starts))
+            else:
+                for i in starts:
+                    fill(i)
         finally:
-            del raw, blocks, chunk
+            del raw, blocks
         return out
+
+    def load_rows(self, name: str, rows) -> "np.ndarray":
+        """Dequantize only the given rows (indices into the first axis) of a 2-D tensor -> float32 (len(rows), row_length)."""
+        if np is None:
+            raise UnsupportedModel("NumPy is not installed.")
+        if self._mm is None:
+            raise ValueError("the GGUF file is closed")
+        info = self.tensors.get(name)
+        layout = _TYPES.get(info.ggml_type) if info else None
+        if layout is None or layout.dequantize is None or len(info.shape) != 2:
+            raise UnsupportedModel(f"Cannot read rows of {name!r}.")
+        n_rows, row_len = info.shape
+        raw = np.frombuffer(self._mm, np.uint8, info.n_bytes, info.offset).reshape(n_rows, row_len // layout.block * layout.size)
+        picked = raw[np.asarray(rows, dtype=np.int64)]  # a copy: nothing keeps the mapping busy
+        del raw
+        out = np.empty((len(picked), row_len), np.float32)
+        layout.dequantize(picked.reshape(-1, layout.size), out.reshape(-1, layout.block))
+        return out
+
+    def same_data(self, a: str, b: str) -> bool:
+        """True when two tensors have the same shape, format and bytes (some files repeat the embedding table as the output matrix)."""
+        ta, tb = self.tensors.get(a), self.tensors.get(b)
+        if ta is None or tb is None or ta.shape != tb.shape or ta.ggml_type != tb.ggml_type or self._mm is None:
+            return False
+        step = 1 << 24
+        for at in range(0, ta.n_bytes, step):
+            n = min(step, ta.n_bytes - at)
+            if self._mm[ta.offset + at:ta.offset + at + n] != self._mm[tb.offset + at:tb.offset + at + n]:
+                return False
+        return True
 
     def close(self) -> None:
         mm, self._mm = self._mm, None

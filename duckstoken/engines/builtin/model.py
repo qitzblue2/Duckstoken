@@ -2,13 +2,15 @@
 
 Runs Llama-style ("llama": Llama 2/3, TinyLlama, Mistral, SmolLM2), "qwen2" and "qwen3" models: RMSNorm, rotary embeddings
 (adjacent-pair or NeoX pairing), grouped-query attention, SwiGLU, optional q/k/v biases and q/k norms, tied embeddings and a
-KV cache. Weights are dequantized to float32 (or float16 when RAM is short) when the model is loaded.
+KV cache. Weights are dequantized to float32 (or bfloat16 when RAM is short) when the model is loaded.
 It is far slower than llama.cpp and is meant for models up to a few billion parameters.
 """
 
 from __future__ import annotations
 
 import math
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,18 +19,24 @@ try:
 except ImportError:  # the engine package reports itself unavailable instead
     np = None
 
-from .gguf_weights import GGUFFile, UnsupportedModel, is_supported, type_name
+from .gguf_weights import SUPPORTED_TYPES, GGUFFile, UnsupportedModel, is_supported, type_name
 from .tokenizer import Tokenizer
 
 LLAMA_CPP_HINT = "Use the llama.cpp engine for this model."
 MAX_PARAMS = 4_500_000_000
 RAM_FRACTION = 0.6        # of the available RAM the model may take
-BATCH = 128               # prompt tokens processed per forward pass
+BATCH = 256               # prompt tokens processed per forward pass (measured fastest of 32..512)
 KV_FLOAT32_LIMIT = 256 << 20
+WIDEN_ELEMENTS = 1 << 18  # bfloat16 weights are widened to float32 this many elements at a time
 
 # arch -> (NeoX rope pairing instead of adjacent pairs, q/k/v biases, q/k norms)
 _ARCHITECTURES = {"llama": (False, False, False), "qwen2": (True, True, False), "qwen3": (True, False, True)}
+SUPPORTED_ARCHITECTURES = tuple(_ARCHITECTURES)
 _MOE_HINTS = ("moe", "mixtral", "gpt-oss", "grok", "dbrx", "arctic", "jamba")
+
+
+def _no_progress(fraction: float, message: str) -> None:
+    pass
 
 
 class ContextFull(ValueError):
@@ -63,9 +71,10 @@ class _Config:
         return self.n_kv_head * self.head_dim
 
 
-def _count(meta: dict, key: str, default=None) -> int:
+def _count(meta: dict, key: str, default=None, limit: int = 1 << 20) -> int:
+    """A positive integer metadata entry (bounded, so that a corrupt file cannot make us build absurd structures)."""
     v = meta.get(key, default)
-    if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+    if not isinstance(v, int) or isinstance(v, bool) or not 1 <= v <= limit:
         raise UnsupportedModel(f"The model file lacks a valid {key!r} entry.")
     return v
 
@@ -99,11 +108,11 @@ def _read_config(meta: dict, tensors: dict) -> _Config:
     embd = tensors.get("token_embd.weight")
     if embd is None:
         raise UnsupportedModel("The model file has no token embedding table.")
-    return _Config(arch=arch, n_layer=_count(meta, f"{arch}.block_count"), n_embd=n_embd, n_head=n_head, n_kv_head=n_kv_head,
+    return _Config(arch=arch, n_layer=_count(meta, f"{arch}.block_count", limit=1024), n_embd=n_embd, n_head=n_head, n_kv_head=n_kv_head,
                    head_dim=head_dim, n_ff=_count(meta, f"{arch}.feed_forward_length"), n_vocab=embd.shape[0],
                    eps=float(meta.get(f"{arch}.attention.layer_norm_rms_epsilon", 1e-5)), rope_dim=rope_dim,
                    rope_base=float(meta.get(f"{arch}.rope.freq_base", 10000.0)), rope_scale=scale, neox=neox,
-                   qkv_bias=qkv_bias, qk_norm=qk_norm, context_length=_count(meta, f"{arch}.context_length"))
+                   qkv_bias=qkv_bias, qk_norm=qk_norm, context_length=_count(meta, f"{arch}.context_length", limit=1 << 30))
 
 
 def _tensor_names(cfg: _Config) -> dict[str, tuple[int, ...]]:
@@ -131,21 +140,43 @@ def _free_ram_bytes() -> int:
         return 0
 
 
+_scratch = threading.local()
+
+
+def _widen_buffer(n: int):
+    """A float32 scratch array whose low 16 bits are zero. Writing a bfloat16 value into the high half of each element
+    (little-endian) turns it into the float32 it stands for, far faster than a float16 -> float32 conversion."""
+    buf = getattr(_scratch, "buf", None)
+    if buf is None or buf.size < n:
+        buf = _scratch.buf = np.zeros(n, np.float32)
+    return buf
+
+
 class _Matrix:
-    """A weight matrix (n_out, n_in). float16 storage is widened a block of rows at a time so that RAM use stays low."""
+    """A weight matrix (n_out, n_in) as float32, or as bfloat16 (uint16 bit patterns) widened a block of rows at a time."""
 
     def __init__(self, w):
         self.w = w
-        self._rows = max(64, (1 << 18) // w.shape[1])
+        self._rows = max(1, WIDEN_ELEMENTS // w.shape[1])
 
     def __call__(self, x):
         w = self.w
         if w.dtype == np.float32:
             return x @ w.T
-        out = np.empty((x.shape[0], w.shape[0]), np.float32)
-        for r in range(0, w.shape[0], self._rows):
-            out[:, r:r + self._rows] = x @ w[r:r + self._rows].astype(np.float32).T
+        n_out, n_in = w.shape
+        out = np.empty((x.shape[0], n_out), np.float32)
+        buf = _widen_buffer(self._rows * n_in)
+        halves = buf.view(np.uint16)
+        for r in range(0, n_out, self._rows):
+            m = min(self._rows, n_out - r)
+            halves[:2 * m * n_in].reshape(m, n_in, 2)[:, :, 1] = w[r:r + m]
+            out[:, r:r + m] = x @ buf[:m * n_in].reshape(m, n_in).T
         return out
+
+    def rows(self, ids):
+        """Rows `ids` of the matrix as float32."""
+        picked = self.w[ids]
+        return picked if picked.dtype == np.float32 else (picked.astype(np.uint32) << 16).view(np.float32)
 
 
 @dataclass
@@ -165,6 +196,42 @@ def _rms_norm(x, weight, eps: float):
     return x * (1.0 / np.sqrt(np.mean(np.square(x), axis=-1, keepdims=True) + eps)) * weight
 
 
+def _plan(gf: GGUFFile):
+    """Everything that can be checked without reading the weights; raises UnsupportedModel with the reason if the model cannot run.
+    Returns (config, tied, n_params, tensor shapes, tokenizer)."""
+    cfg = _read_config(gf.meta, gf.tensors)
+    tied = "output.weight" not in gf.tensors or gf.same_data("output.weight", "token_embd.weight")
+    n_params = sum(t.n_elements for n, t in gf.tensors.items() if not (tied and n == "output.weight"))
+    if n_params > MAX_PARAMS:
+        raise UnsupportedModel(f"This model has {n_params / 1e9:.1f} billion parameters, too many for the built-in engine "
+                               f"(limit {MAX_PARAMS / 1e9:.1f} billion). {LLAMA_CPP_HINT}")
+    shapes = _tensor_names(cfg)
+    LoadedModel._check_tensors(gf, shapes)  # noqa: SLF001
+    tokenizer = Tokenizer.from_gguf(gf.meta)
+    if tokenizer.vocab_size > cfg.n_vocab:
+        raise UnsupportedModel("The tokenizer has more tokens than the model's embedding table.")
+    return cfg, tied, n_params, shapes, tokenizer
+
+
+def _resident_params(cfg: _Config, tied: bool, n_params: int) -> int:
+    return n_params - (0 if tied else cfg.n_vocab * cfg.n_embd)  # a separate embedding table stays on disk
+
+
+def inspect_model(path) -> dict:
+    """Quickly check whether the built-in engine can run a GGUF file, without reading its weights.
+
+    Returns {"name", "arch", "n_params", "context_length", "vocab_size", "formats", "chat_format", "ram_gb": {"float32", "bfloat16"}}
+    (weights only, without the KV cache) or raises UnsupportedModel with a plain-language reason.
+    """
+    with GGUFFile(path) as gf:
+        cfg, tied, n_params, _, tokenizer = _plan(gf)
+        resident = _resident_params(cfg, tied, n_params)
+        return {"name": str(gf.meta.get("general.name") or Path(path).stem), "arch": cfg.arch, "n_params": n_params,
+                "context_length": cfg.context_length, "vocab_size": cfg.n_vocab,
+                "formats": sorted({t.type_name for t in gf.tensors.values()}), "chat_format": tokenizer.chat_format,
+                "ram_gb": {"float32": round(resident * 4 / 2**30, 2), "bfloat16": round(resident * 2 / 2**30, 2)}}
+
+
 class LoadedModel:
     """A model in memory. Create sessions with `new_session()`; the model itself is read-only and can be shared."""
 
@@ -178,48 +245,48 @@ class LoadedModel:
     weight_dtype: str
     kv_dtype: str
 
-    def __init__(self, path, max_ctx: int = 2048, n_threads: int = 0, progress=lambda fraction, message: None, *,
+    def __init__(self, path, max_ctx: int = 2048, n_threads: int = 0, progress=_no_progress, *,
                  weight_dtype: str = "auto", kv_dtype: str = "auto"):
         if np is None:
             raise UnsupportedModel("NumPy is not installed, so the built-in engine is unavailable.")
-        if weight_dtype not in ("auto", "float32", "float16") or kv_dtype not in ("auto", "float32", "float16"):
-            raise ValueError("weight_dtype and kv_dtype must be 'auto', 'float32' or 'float16'")
+        if weight_dtype not in ("auto", "float32", "bfloat16") or kv_dtype not in ("auto", "float32", "float16"):
+            raise ValueError("weight_dtype must be 'auto', 'float32' or 'bfloat16' and kv_dtype 'auto', 'float32' or 'float16'")
+        if sys.byteorder != "little":
+            raise UnsupportedModel("The built-in engine needs a little-endian computer.")
         if not isinstance(max_ctx, int) or max_ctx < 8:
             raise ValueError("max_ctx must be an integer of at least 8")
         self._limits = None
+        self._gf = None
         self.layers = None
-        with GGUFFile(path) as gf:
-            self.cfg = cfg = _read_config(gf.meta, gf.tensors)
+        gf = GGUFFile(path)
+        try:
+            self.cfg, self.tied, self.n_params, shapes, self.tokenizer = _plan(gf)
             self.name = str(gf.meta.get("general.name") or Path(path).stem)
-            self.arch = cfg.arch
-            self.n_params = sum(t.n_elements for t in gf.tensors.values())
-            self.context_length = cfg.context_length
-            self.max_ctx = min(max_ctx, cfg.context_length)
-            self.vocab_size = cfg.n_vocab
-            if self.n_params > MAX_PARAMS:
-                raise UnsupportedModel(f"This model has {self.n_params / 1e9:.1f} billion parameters, too many for the built-in "
-                                       f"engine (limit {MAX_PARAMS / 1e9:.1f} billion). {LLAMA_CPP_HINT}")
-            shapes = _tensor_names(cfg)
-            self._check_tensors(gf, shapes)
-            self.tokenizer = Tokenizer.from_gguf(gf.meta)
-            if self.tokenizer.vocab_size > cfg.n_vocab:
-                raise UnsupportedModel("The tokenizer has more tokens than the model's embedding table.")
+            self.arch = self.cfg.arch
+            self.context_length = self.cfg.context_length
+            self.max_ctx = min(max_ctx, self.cfg.context_length)
+            self.vocab_size = self.cfg.n_vocab
             self._choose_dtypes(weight_dtype, kv_dtype)
             if n_threads > 0:
                 self._limit_threads(n_threads)
-            try:
-                self._load_weights(gf, shapes, progress)
-            except BaseException:
-                self.close()
-                raise
+            self._load_weights(gf, shapes, progress)
+        except BaseException:
+            gf.close()
+            self.close()
+            raise
+        if self.tied:
+            gf.close()
+        else:
+            self._gf = gf  # the embedding table is read row by row from the file instead of being kept in RAM
         progress(1.0, "Model ready")
 
     @classmethod
-    def load(cls, path, max_ctx: int = 2048, n_threads: int = 0, progress=lambda fraction, message: None, *,
+    def load(cls, path, max_ctx: int = 2048, n_threads: int = 0, progress=_no_progress, *,
              weight_dtype: str = "auto", kv_dtype: str = "auto") -> "LoadedModel":
         """Read a GGUF model. Raises UnsupportedModel (with a plain-language reason) for anything it cannot run.
 
-        `weight_dtype` / `kv_dtype` are "auto", "float32" or "float16"; "auto" keeps float32 unless the RAM is short.
+        `weight_dtype` is "auto", "float32" or "bfloat16" and `kv_dtype` "auto", "float32" or "float16". "auto" keeps float32
+        unless the RAM is short: bfloat16 weights take half the memory and run several times slower.
         """
         return cls(path, max_ctx, n_threads, progress, weight_dtype=weight_dtype, kv_dtype=kv_dtype)
 
@@ -229,31 +296,39 @@ class LoadedModel:
         for name, shape in shapes.items():
             info = gf.tensors.get(name)
             if info is None:
-                raise UnsupportedModel(f"The model file is missing the tensor {name!r}; it is not a standard {gf.meta.get('general.architecture')} model.")
+                raise UnsupportedModel(f"The model file is missing the tensor {name!r}; it is not a standard "
+                                       f"{gf.meta.get('general.architecture')} model.")
             if info.shape != shape:
                 raise UnsupportedModel(f"Tensor {name!r} has shape {info.shape}, expected {shape}.")
             if not is_supported(info.ggml_type):
                 raise UnsupportedModel(f"The model uses the {type_name(info.ggml_type)} format (tensor {name!r}), which the built-in engine "
-                                       f"cannot read. It reads F32, F16, BF16, Q8_0, Q6_K, Q5_K, Q4_K, Q3_K, Q2_K, Q5_0, Q5_1, Q4_0, Q4_1 "
-                                       f"and IQ4_NL/IQ4_XS files. Download a Q8_0 or Q4_K_M version, or use the llama.cpp engine.")
+                                       f"cannot read. It reads {', '.join(SUPPORTED_TYPES)} files. Download a Q8_0 or Q4_K_M version, "
+                                       f"or use the llama.cpp engine.")
         out = gf.tensors.get("output.weight")
-        if out is not None and (out.shape != (shapes["token_embd.weight"]) or not is_supported(out.ggml_type)):
+        if out is not None and (out.shape != shapes["token_embd.weight"] or not is_supported(out.ggml_type)):
             raise UnsupportedModel("The model's output projection has an unsupported shape or format.")
+        # tensors we would silently ignore mean this is a variant of the architecture that needs more than we implement
+        unknown = [n for n in gf.tensors if n not in shapes and n not in ("output.weight", "rope_freqs.weight")
+                   and not n.endswith(".attn_rot_embd.weight")]
+        if unknown:
+            raise UnsupportedModel(f"This model has parts the built-in engine does not implement ({', '.join(unknown[:3])}"
+                                   f"{', …' if len(unknown) > 3 else ''}), so it would answer wrongly. {LLAMA_CPP_HINT}")
 
     def _choose_dtypes(self, weight_dtype: str, kv_dtype: str) -> None:
         cfg = self.cfg
         kv_elements = 2 * cfg.n_layer * cfg.kv_dim * self.max_ctx
         self.kv_dtype = kv_dtype if kv_dtype != "auto" else ("float32" if kv_elements * 4 <= KV_FLOAT32_LIMIT else "float16")
         kv_bytes = kv_elements * (4 if self.kv_dtype == "float32" else 2)
+        resident = _resident_params(cfg, self.tied, self.n_params)
         free = _free_ram_bytes()
         budget = free * RAM_FRACTION
         if weight_dtype == "auto":
-            if not free or self.n_params * 4 + kv_bytes <= budget:
+            if not free or resident * 4 + kv_bytes <= budget:
                 weight_dtype = "float32"
-            elif self.n_params * 2 + kv_bytes <= budget:
-                weight_dtype = "float16"
+            elif resident * 2 + kv_bytes <= budget:
+                weight_dtype = "bfloat16"
             else:
-                raise UnsupportedModel(f"This model needs about {(self.n_params * 2 + kv_bytes) / 2**30:.1f} GB of RAM even in half precision, "
+                raise UnsupportedModel(f"This model needs about {(resident * 2 + kv_bytes) / 2**30:.1f} GB of RAM even in half precision, "
                                        f"but only {free / 2**30:.1f} GB is free. Close other programs, pick a smaller or more compressed "
                                        f"model, or use the llama.cpp engine.")
         self.weight_dtype = weight_dtype
@@ -266,7 +341,8 @@ class LoadedModel:
             self._limits = None
 
     def _load_weights(self, gf: GGUFFile, shapes: dict, progress) -> None:
-        cfg, wdt = self.cfg, np.dtype(self.weight_dtype)
+        cfg, wdt = self.cfg, self.weight_dtype
+        stored = np.dtype(np.float32 if wdt == "float32" else np.uint16)
         total, done = len(shapes), 0
 
         def step(name: str) -> None:
@@ -276,7 +352,7 @@ class LoadedModel:
 
         def fused(*names: str) -> "np.ndarray":
             rows = [shapes[n][0] for n in names]
-            out = np.empty((sum(rows), shapes[names[0]][1]), wdt)
+            out = np.empty((sum(rows), shapes[names[0]][1]), stored)
             at = 0
             for n, r in zip(names, rows):
                 gf.load(n, wdt, out=out[at:at + r])
@@ -288,17 +364,11 @@ class LoadedModel:
             step(name)
             return gf.load(name)
 
-        embed = np.empty(shapes["token_embd.weight"], wdt)
-        gf.load("token_embd.weight", wdt, out=embed)
-        step("token_embd.weight")
-        self.embed = _Matrix(embed)
-        if "output.weight" in gf.tensors:
-            head = np.empty(embed.shape, wdt)
-            gf.load("output.weight", wdt, out=head)
-            step("output.weight")
-            self.head = _Matrix(head)
-        else:
-            self.head = self.embed
+        head_name = "token_embd.weight" if self.tied else "output.weight"  # tied: one matrix is both the embedding and the head
+        head = np.empty(shapes["token_embd.weight"], stored)
+        gf.load(head_name, wdt, out=head)
+        step(head_name)
+        self.head = _Matrix(head)
         self.output_norm = vector("output_norm.weight")
         self.layers = []
         for i in range(cfg.n_layer):
@@ -328,11 +398,14 @@ class LoadedModel:
         self.rope_cos, self.rope_sin = np.cos(angles).astype(np.float32), np.sin(angles).astype(np.float32)
 
     def close(self) -> None:
-        """Drop the weights and undo the thread limit set at load time."""
+        """Drop the weights, close the model file and undo the thread limit set at load time."""
         limits, self._limits = getattr(self, "_limits", None), None
         if limits is not None:
             limits.restore_original_limits()
-        for attr in ("embed", "head", "layers", "rope_cos", "rope_sin"):
+        gf, self._gf = getattr(self, "_gf", None), None
+        if gf is not None:
+            gf.close()
+        for attr in ("head", "layers", "rope_cos", "rope_sin"):
             setattr(self, attr, None)
 
     def new_session(self) -> "Session":
@@ -369,7 +442,7 @@ class LoadedModel:
 
     def _forward(self, session: "Session", tokens, want_logits: bool):
         cfg, t, p0 = self.cfg, len(tokens), session.n_past
-        x = self.embed.w[tokens].astype(np.float32)
+        x = self.head.rows(tokens) if self.tied else self._gf.load_rows("token_embd.weight", tokens)
         cos, sin = self.rope_cos[p0:p0 + t], self.rope_sin[p0:p0 + t]
         scale = 1.0 / math.sqrt(cfg.head_dim)
         # a query may only see keys up to and including itself
@@ -414,7 +487,10 @@ class Session:
         model = self.model
         if model.layers is None:
             raise ValueError("the model has been closed")
-        tokens = np.asarray(token_ids, dtype=np.int64)
+        try:
+            tokens = np.asarray(token_ids, dtype=np.int64)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("feed() needs a list of integer token ids") from None
         if tokens.ndim != 1 or tokens.size == 0:
             raise ValueError("feed() needs a non-empty list of token ids")
         if tokens.min() < 0 or tokens.max() >= model.vocab_size:

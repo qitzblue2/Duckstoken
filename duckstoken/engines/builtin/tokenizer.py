@@ -16,8 +16,10 @@ import unicodedata
 from .gguf_weights import UnsupportedModel
 
 NORMAL, UNKNOWN, CONTROL, USER_DEFINED, UNUSED, BYTE = 1, 2, 3, 4, 5, 6  # GGUF token types
-SEPARATOR = "▁"  # SentencePiece's visible space
+SEPARATOR = "\u2581"  # SentencePiece's visible space
 _MAX_CACHE = 50_000
+_BYTE_TOKEN = re.compile(r"<0x([0-9A-Fa-f]{2})>")
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 _END_OF_TURN = {"<|im_end|>", "<|eot_id|>", "<|eom_id|>", "<|end|>", "<end_of_turn>", "<|endoftext|>", "<|end_of_text|>", "<eos>"}
 
 
@@ -37,7 +39,8 @@ def _unicode_classes() -> tuple[str, str]:
                 r[-1][1] = cp
             else:
                 r.append([cp, cp])
-    return tuple("".join(f"\\U{a:08x}" if a == b else f"\\U{a:08x}-\\U{b:08x}" for a, b in runs[k]) for k in "LN")  # type: ignore[return-value]
+    letters, numbers = ("".join(f"\\U{a:08x}" if a == b else f"\\U{a:08x}-\\U{b:08x}" for a, b in runs[k]) for k in "LN")
+    return letters, numbers
 
 
 def _translate(pattern: str) -> str:
@@ -98,6 +101,43 @@ def _split(text: str, regexes) -> list[str]:
     return pieces
 
 
+def _merge_pairs(symbols: list[str], priority) -> list[str]:
+    """Repeatedly merge the adjacent pair with the lowest `priority(left, right)` (leftmost first on ties; None = never merge)
+    until none is left. A linked list and a heap make it O(n log n), so even one enormous "word" is fast."""
+    syms: list[str | None] = list(symbols)
+    n = len(syms)
+    nxt, prv = list(range(1, n + 1)), list(range(-1, n - 1))
+    nxt[-1] = -1
+    heap: list = []
+
+    def offer(i: int) -> None:
+        j = nxt[i]
+        if j >= 0:
+            rank = priority(syms[i], syms[j])
+            if rank is not None:
+                heapq.heappush(heap, (rank, i, syms[i], syms[j]))
+
+    for i in range(n - 1):
+        offer(i)
+    while heap:
+        _, i, a, b = heapq.heappop(heap)
+        j = nxt[i]
+        if syms[i] != a or j < 0 or syms[j] != b:
+            continue  # stale entry: one side was merged since it was queued
+        syms[i], syms[j] = a + b, None
+        nxt[i] = nxt[j]
+        if nxt[j] >= 0:
+            prv[nxt[j]] = i
+        if prv[i] >= 0:
+            offer(prv[i])
+        offer(i)
+    out, i = [], 0
+    while i >= 0:
+        out.append(syms[i])
+        i = nxt[i]
+    return out
+
+
 @functools.lru_cache(maxsize=1)
 def _byte_unicode() -> tuple[dict[int, str], dict[str, int]]:
     """GPT-2's reversible byte <-> printable-character table."""
@@ -150,10 +190,12 @@ def detect_chat_format(template: str | None) -> str:
     return "chatml"
 
 
+_NL = r"(?:\\n|\n)"  # a newline inside a Jinja string literal is written either as backslash-n or as a real line break
+
+
 def _today() -> str:
     d = datetime.date.today()
-    return f"{d.day:02d} {('Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec').split()[d.month - 1]} {d.year}"
-
+    return f"{d.day:02d} {_MONTHS[d.month - 1]} {d.year}"
 
 
 class Tokenizer:
@@ -188,8 +230,9 @@ class Tokenizer:
             raise UnsupportedModel(f"The built-in engine cannot read this model's tokenizer ({model or 'none found'}). "
                                    "It supports byte-level BPE (Qwen, Llama 3, SmolLM) and SentencePiece (Llama 2, Mistral, TinyLlama).")
         types = meta.get("tokenizer.ggml.token_type") or [NORMAL] * len(tokens)
-        if len(types) != len(tokens):
+        if len(types) != len(tokens) or not all(isinstance(t, str) for t in tokens):
             raise UnsupportedModel("The model's tokenizer data is inconsistent (token and token type counts differ).")
+        template = meta.get("tokenizer.chat_template")
 
         def token_id(key):
             v = meta.get(key)
@@ -199,7 +242,7 @@ class Tokenizer:
         eos = {i for i in (eos_id, token_id("tokenizer.ggml.eot_token_id"), token_id("tokenizer.ggml.eom_token_id")) if i is not None}
         eos |= {i for i, t in enumerate(tokens) if t in _END_OF_TURN and types[i] in (CONTROL, USER_DEFINED)}
         common = dict(tokens=tokens, types=types, bos_id=token_id("tokenizer.ggml.bos_token_id"), eos_id=eos_id, eos_ids=eos,
-                      chat_template=meta.get("tokenizer.chat_template") if isinstance(meta.get("tokenizer.chat_template"), str) else None,
+                      chat_template=template if isinstance(template, str) else None,
                       unk_id=token_id("tokenizer.ggml.unknown_token_id"))
         if model == "gpt2":
             return _ByteLevelBPE(add_bos=bool(meta.get("tokenizer.ggml.add_bos_token", False)),
@@ -214,6 +257,10 @@ class Tokenizer:
 
         A BOS token is never doubled: `add_bos=True` is safe for chat prompts whose template already starts with it.
         """
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:  # a lone surrogate (from a malformed JSON escape) cannot be tokenized
+            text = text.encode("utf-8", "replace").decode("utf-8")
         ids: list[int] = []
         after_special = True
         for is_token, payload in self._fragments(text, parse_special):
@@ -257,8 +304,11 @@ class Tokenizer:
         piece = cache[token_id]
         if piece is None:
             kind = self.types[token_id]
+            byte_token = _BYTE_TOKEN.fullmatch(self.tokens[token_id]) if kind == BYTE else None
             if kind in (CONTROL, UNKNOWN, UNUSED) and not special:
                 piece = b""
+            elif byte_token:
+                piece = bytes([int(byte_token[1], 16)])
             else:
                 piece = self._token_bytes(token_id, kind)
             cache[token_id] = piece
@@ -276,13 +326,17 @@ class Tokenizer:
         return StreamDecoder(self, special, self._strip_first_space)
 
     # ----------------------------------------------------------------------------------------------- chat templates
-    def apply_chat_template(self, messages: list[dict], add_generation_prompt: bool = True) -> str:
+    def apply_chat_template(self, messages: list[dict], add_generation_prompt: bool = True, enable_thinking: bool | None = None) -> str:
         """Render a conversation in the model's own prompt format (decided from its GGUF chat template, never executed).
 
         The result includes the BOS text for families whose template emits it; encode it with `parse_special=True`.
+        `enable_thinking=False` is the Qwen3 switch that skips the reasoning phase; other models ignore it.
         """
         turns = _messages(messages)
-        return getattr(self, "_render_" + self.chat_format)(turns, add_generation_prompt)
+        render = getattr(self, "_render_" + self.chat_format)
+        if self.chat_format == "chatml":
+            return render(turns, add_generation_prompt, enable_thinking)
+        return render(turns, add_generation_prompt)
 
     def _bos_text(self) -> str:
         return self.tokens[self.bos_id] if self.bos_id is not None and "bos_token" in self.chat_template else ""
@@ -290,19 +344,22 @@ class Tokenizer:
     def _eos_text(self) -> str:
         return self.tokens[self.eos_id] if self.eos_id is not None else ""
 
-    def _render_chatml(self, turns, add_generation_prompt: bool) -> str:
+    def _render_chatml(self, turns, add_generation_prompt: bool, enable_thinking: bool | None = None) -> str:
         t = self.chat_template
         out = []
-        default = re.search(r"<\|im_start\|>system\\n([^'\"{}]+)<\|im_end\|>\\n", t)
+        default = re.search(rf"<\|im_start\|>system{_NL}([^'\"{{}}]{{1,500}})<\|im_end\|>{_NL}", t)
         if turns[0][0] != "system" and default:
             out.append(f"<|im_start|>system\n{default.group(1)}<|im_end|>\n")
         for role, text in turns:
-            if role == "assistant" and "</think>" in t:
+            if role == "assistant" and "</think>" in t and "</think>" in text:
                 text = text.split("</think>")[-1].lstrip("\n")  # Qwen3 templates drop earlier reasoning
             out.append(f"<|im_start|>{role}\n{text}<|im_end|>\n")
         if add_generation_prompt:
-            thinking = re.search(r"<\|im_start\|>assistant\\n<think>\\n'", t)
-            out.append("<|im_start|>assistant\n" + ("<think>\n" if thinking else ""))
+            out.append("<|im_start|>assistant\n")
+            if enable_thinking is False and "enable_thinking" in t:
+                out.append("<think>\n\n</think>\n\n")
+            elif re.search(rf"<\|im_start\|>assistant{_NL}<think>{_NL}'", t):
+                out.append("<think>\n")
         return "".join(out)
 
     def _render_llama3(self, turns, add_generation_prompt: bool) -> str:
@@ -333,8 +390,7 @@ class Tokenizer:
 
     def _render_phi3(self, turns, add_generation_prompt: bool) -> str:
         out = [self._bos_text()] + [f"<|{role}|>\n{text}<|end|>\n" for role, text in turns]
-        if add_generation_prompt:
-            out.append("<|assistant|>\n")
+        out.append("<|assistant|>\n" if add_generation_prompt else self._eos_text())
         return "".join(out)
 
     def _render_zephyr(self, turns, add_generation_prompt: bool) -> str:
@@ -413,7 +469,7 @@ class _ByteLevelBPE(Tokenizer):
         self._to_char, self._to_byte = _byte_unicode()
         self._ranks: dict[tuple[str, str], int] = {}
         for rank, merge in enumerate(merges):
-            a, _, b = merge.partition(" ")
+            a, _, b = merge.partition(" ") if isinstance(merge, str) else ("", "", "")
             if b and a + b in self._token_ids:
                 self._ranks.setdefault((a, b), rank)
         self._cache: dict[str, tuple[int, ...]] = {}
@@ -431,49 +487,17 @@ class _ByteLevelBPE(Tokenizer):
         return ids
 
     def _merge(self, word: str) -> list[int]:
-        """Greedy BPE: repeatedly merge the adjacent pair with the lowest merge rank (leftmost first), in O(n log n)."""
-        syms: list[str | None] = list(word)
-        n = len(syms)
-        nxt, prv = list(range(1, n + 1)), list(range(-1, n - 1))
-        nxt[-1] = -1
-        ranks, heap = self._ranks, []
-
-        def offer(i: int) -> None:
-            j = nxt[i]
-            if j >= 0:
-                rank = ranks.get((syms[i], syms[j]))
-                if rank is not None:
-                    heapq.heappush(heap, (rank, i, syms[i], syms[j]))
-
-        for i in range(n - 1):
-            offer(i)
-        while heap:
-            _, i, a, b = heapq.heappop(heap)
-            j = nxt[i]
-            if syms[i] != a or j < 0 or syms[j] != b:
-                continue  # stale entry: one side was merged since it was queued
-            syms[i], syms[j] = a + b, None
-            nxt[i] = nxt[j]
-            if nxt[j] >= 0:
-                prv[nxt[j]] = i
-            if prv[i] >= 0:
-                offer(prv[i])
-            offer(i)
-        ids, i = [], 0
-        while i >= 0:
-            token = self._token_ids.get(syms[i])
+        ranks = self._ranks
+        ids = []
+        for symbol in _merge_pairs(list(word), lambda a, b: ranks.get((a, b))):
+            token = self._token_ids.get(symbol, self.unk_id)
             if token is not None:
                 ids.append(token)
-            elif self.unk_id is not None:
-                ids.append(self.unk_id)
-            i = nxt[i]
         return ids
 
     def _token_bytes(self, token_id: int, kind: int) -> bytes:
         text = self.tokens[token_id]
-        if kind == BYTE and re.fullmatch(r"<0x[0-9A-Fa-f]{2}>", text):
-            return bytes([int(text[3:5], 16)])
-        if kind in (NORMAL, BYTE):
+        if kind == NORMAL:  # a normal token spells its bytes with GPT-2's printable stand-ins
             return b"".join(bytes([self._to_byte[c]]) if c in self._to_byte else c.encode("utf-8") for c in text)
         return text.encode("utf-8")
 
@@ -496,52 +520,25 @@ class _SentencePiece(Tokenizer):
     def _encode_text(self, text: str, after_special: bool) -> list[int]:
         if self.add_space_prefix and after_special:
             text = " " + text
-        syms: list[str | None] = list(text.replace(" ", SEPARATOR))
-        n = len(syms)
-        if n == 0:
+        if not text:
             return []
-        nxt, prv = list(range(1, n + 1)), list(range(-1, n - 1))
-        nxt[-1] = -1
-        ids, scores, heap = self._merge_ids, self._scores, []
+        ids, scores = self._merge_ids, self._scores
 
-        def offer(i: int) -> None:
-            j = nxt[i]
-            if j >= 0:
-                token = ids.get(syms[i] + syms[j])
-                if token is not None:
-                    heapq.heappush(heap, (-scores[token], i, syms[i], syms[j]))
+        def priority(a: str, b: str):
+            token = ids.get(a + b)
+            return None if token is None else -scores[token]
 
-        for i in range(n - 1):
-            offer(i)
-        while heap:
-            _, i, a, b = heapq.heappop(heap)
-            j = nxt[i]
-            if syms[i] != a or j < 0 or syms[j] != b:
-                continue
-            syms[i], syms[j] = a + b, None
-            nxt[i] = nxt[j]
-            if nxt[j] >= 0:
-                prv[nxt[j]] = i
-            if prv[i] >= 0:
-                offer(prv[i])
-            offer(i)
-        out, i = [], 0
-        while i >= 0:
-            token = ids.get(syms[i])
+        out = []
+        for symbol in _merge_pairs(list(text.replace(" ", SEPARATOR)), priority):
+            token = ids.get(symbol)
             if token is not None:
                 out.append(token)
-            else:
-                for byte in syms[i].encode("utf-8"):
-                    b = self._byte_ids[byte]
-                    if b is not None:
-                        out.append(b)
-                    elif self.unk_id is not None:
-                        out.append(self.unk_id)
-            i = nxt[i]
+                continue
+            for byte in symbol.encode("utf-8"):  # not in the vocabulary: spell it with byte tokens
+                token = self._byte_ids[byte] if self._byte_ids[byte] is not None else self.unk_id
+                if token is not None:
+                    out.append(token)
         return out
 
     def _token_bytes(self, token_id: int, kind: int) -> bytes:
-        text = self.tokens[token_id]
-        if kind == BYTE and re.fullmatch(r"<0x[0-9A-Fa-f]{2}>", text):
-            return bytes([int(text[3:5], 16)])
-        return text.replace(SEPARATOR, " ").encode("utf-8")
+        return self.tokens[token_id].replace(SEPARATOR, " ").encode("utf-8")

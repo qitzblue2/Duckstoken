@@ -19,7 +19,7 @@ BLOCK = {"f32": (1, 4), "f16": (1, 2), "bf16": (1, 2), "q4_0": (32, 18), "q4_1":
          "q8_0": (32, 34), "iq4_nl": (32, 18), "q2_k": (256, 84), "q3_k": (256, 110), "q4_k": (256, 144), "q5_k": (256, 176),
          "q6_k": (256, 210), "iq4_xs": (256, 136)}
 IQ4_NL_TABLE = np.array([-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113], np.float32)
-SEPARATOR = "▁"  # the SentencePiece word-boundary mark
+SEPARATOR = "\u2581"  # the SentencePiece word-boundary mark
 
 
 # ------------------------------------------------------------------------------------------------ quantizers
@@ -87,18 +87,13 @@ def _q5_1(x):
     return blocks
 
 
-def _min_max_levels(x, n_sub: int, qmax: int, smax: int):
-    """Shared by Q2_K/Q4_K/Q5_K: y = d*sc*q - dmin*mn per sub-block. Returns (d, dmin, sc, mn, q) with q in 0..qmax."""
-    xs = x.reshape(len(x), n_sub, -1)
-    lo = np.minimum(xs.min(2), 0)
-    scale, minimum = (xs.max(2) - lo) / qmax, -lo
-    d = scale.max(1) / smax
-    dmin = minimum.max(1) / smax
-    return xs, d, dmin, scale, minimum
-
-
 def _k_min_max(x, n_sub: int, qmax: int, smax: int):
-    xs, d, dmin, scale, minimum = _min_max_levels(x, n_sub, qmax, smax)
+    """Shared by Q2_K/Q4_K/Q5_K: y = d*sc*q - dmin*mn per sub-block, with q in 0..qmax and 0 <= sc, mn <= smax.
+    Returns (d, dmin, sc, mn, q)."""
+    xs = x.reshape(len(x), n_sub, -1)
+    low = np.minimum(xs.min(2), 0)
+    scale, minimum = (xs.max(2) - low) / qmax, -low
+    d, dmin = scale.max(1) / smax, minimum.max(1) / smax
     d16, dmin16 = d.astype("<f2").astype(np.float32), dmin.astype("<f2").astype(np.float32)
     sc = np.clip(np.rint(scale * _inverse(d16)[:, None]), 0, smax).astype(np.uint8)
     mn = np.clip(np.rint(minimum * _inverse(dmin16)[:, None]), 0, smax).astype(np.uint8)
@@ -404,12 +399,13 @@ def write_tiny_llama_gguf(path, *, n_layer: int = 2, n_embd: int = 32, n_head: i
                           head_dim: int | None = None, vocab: dict | None = None, tokenizer: str = "bpe", quant: str = "f32",
                           seed: int = 0, arch: str = "llama", tie_embeddings: bool = False, rope_base: float = 10000.0,
                           rope_freqs: np.ndarray | None = None, context_length: int = 256, chat_template: str | None = None,
-                          name: str = "tiny", extra_meta: dict | None = None) -> TinyModel:
+                          name: str = "tiny", extra_meta: dict | None = None, mutate=None) -> TinyModel:
     """Write a valid decoder-only GGUF with random weights.
 
     `arch` is "llama", "qwen2" (q/k/v biases) or "qwen3" (q/k RMS norms); `tokenizer` is "bpe" or "spm" unless `vocab` (tokenizer
     metadata, e.g. from bpe_tokenizer_meta) is given. 2-D weights are stored as `quant`; tensors whose rows do not fit the block
-    size fall back to q8_0, as llama.cpp does for K-quants.
+    size fall back to q8_0, as llama.cpp does for K-quants. `extra_meta` adds or overrides metadata; `mutate(weights)` may edit
+    the {tensor name: float32 array} dict before it is written (to build broken or unusual files).
     """
     rng = np.random.default_rng(seed)
     tok_meta = vocab if vocab is not None else (spm_tokenizer_meta(chat_template=chat_template) if tokenizer == "spm"
@@ -433,7 +429,8 @@ def write_tiny_llama_gguf(path, *, n_layer: int = 2, n_embd: int = 32, n_head: i
     for i in range(n_layer):
         b = f"blk.{i}."
         w[b + "attn_norm.weight"] = norm(n_embd)
-        w[b + "attn_q.weight"], w[b + "attn_k.weight"], w[b + "attn_v.weight"] = weight(q_dim, n_embd), weight(kv_dim, n_embd), weight(kv_dim, n_embd)
+        for proj, rows in (("q", q_dim), ("k", kv_dim), ("v", kv_dim)):
+            w[b + f"attn_{proj}.weight"] = weight(rows, n_embd)
         if arch == "qwen2":
             w[b + "attn_q.bias"], w[b + "attn_k.bias"], w[b + "attn_v.bias"] = (
                 (0.2 * rng.standard_normal(n)).astype(np.float32) for n in (q_dim, kv_dim, kv_dim))
@@ -441,7 +438,11 @@ def write_tiny_llama_gguf(path, *, n_layer: int = 2, n_embd: int = 32, n_head: i
             w[b + "attn_q_norm.weight"], w[b + "attn_k_norm.weight"] = norm(hd), norm(hd)
         w[b + "attn_output.weight"] = weight(n_embd, q_dim)
         w[b + "ffn_norm.weight"] = norm(n_embd)
-        w[b + "ffn_gate.weight"], w[b + "ffn_up.weight"], w[b + "ffn_down.weight"] = weight(n_ff, n_embd), weight(n_ff, n_embd), weight(n_embd, n_ff)
+        w[b + "ffn_gate.weight"], w[b + "ffn_up.weight"] = weight(n_ff, n_embd), weight(n_ff, n_embd)
+        w[b + "ffn_down.weight"] = weight(n_embd, n_ff)
+
+    if mutate is not None:
+        mutate(w)
 
     meta = {"general.architecture": arch, "general.name": name, "general.file_type": 0,
             f"{arch}.context_length": context_length, f"{arch}.embedding_length": n_embd, f"{arch}.block_count": n_layer,
