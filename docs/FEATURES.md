@@ -50,6 +50,11 @@ unit tests with injected fakes and by GitHub Actions on `windows-latest` (build 
 | Installer + portable exe + SHA-256 sums | Built and smoke-tested by GitHub Actions on Windows | Unsigned: Windows SmartScreen will warn. |
 | Auto-update with verified download | Implemented & tested against a fake GitHub | Size + SHA-256 checked before install. |
 
+## Review
+
+An independent adversarial review of this code (20 confirmed findings, all fixed with regression tests) is summarised in
+[SECURITY_REVIEW.md](SECURITY_REVIEW.md).
+
 ## Known limits, stated plainly
 
 * Software cannot turn RAM into VRAM or add GPU compute. The tiers are coordinated, not merged.

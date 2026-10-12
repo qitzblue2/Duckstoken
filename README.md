@@ -110,11 +110,18 @@ It works — slowly — **if the model lives on an SSD** (the numbers below are 
 ## PC access — read this before enabling
 
 Everything is **off by default**. Under **PC access** you choose which tools exist, which folders they may touch
-(or *Full PC access*), and which actions need your approval. Writes and commands **ask first by default**,
+(or *Full PC access*), and which actions need your approval. Writes and commands **ask first by default** (the dialog shows the
+exact text that would be written, and never offers "always allow" for writes, commands or secrets), web tools ask first by default,
 system folders are write-protected, and every call is appended to `tool_audit.jsonl`.
+
+Two protections you cannot switch off: Duckstoken's own data folder (it holds your settings and API keys) is unreadable and unwritable
+for the AI, and anything that looks like credentials — `.ssh`, `.aws`, browser profiles, `.env`, key files — needs an approval every time,
+whatever the "ask first" switches say. Importing a settings file or loading a profile that grants PC access, turns off approvals or changes
+the program Duckstoken launches asks you to confirm, and exported settings never include API keys.
 
 Be aware: text the model reads (a web page, a document, a repo) can contain instructions that try to make it misuse tools
 (prompt injection). Commands are **not sandboxed** — they run with your Windows permissions. Keep the confirmations on.
+See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md) for what an independent review of this code found.
 
 ## Security of the app itself
 
