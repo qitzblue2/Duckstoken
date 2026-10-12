@@ -293,6 +293,8 @@ class VGpuStore:
             return "stale"
         return "missing"
 
+    profile_key = staticmethod(profile_key)   # `store.profile_key(hw, model, backend)` as well as `store.profile_key(...)`
+
     def stale_profiles(self, key: str) -> list[dict]:
         """Profiles for the same model as `key` whose hardware or engine fingerprint differs."""
         parts = _split_key(key)

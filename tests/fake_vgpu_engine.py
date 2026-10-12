@@ -211,7 +211,7 @@ class H(BaseHTTPRequestHandler):
 
 def main():
     if flag("--version"):
-        print("version: 9999 (fakeabc)\nbuilt with fake for tests", file=sys.stderr, flush=True)
+        print("version: 0.6.0-dev (build 9999, commit abc1234)\nbuilt with GNU 13.3.0 for Linux x86_64", file=sys.stderr, flush=True)
         return
     if flag("--list-devices"):
         print("Available devices:\n  (none)", file=sys.stderr, flush=True)

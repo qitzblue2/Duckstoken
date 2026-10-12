@@ -22,9 +22,19 @@ from pathlib import Path
 
 from .. import hardware, settings, tuner
 from . import memcalc, quant
-from .memcalc import (ASSUMPTION_DOCS, DEFAULT_ASSUMPTIONS, GIB, bytes_per_element, compute_buffer_bytes,  # noqa: F401
-                      kv_cache_bytes, measured_tiers_gb, norm_model, parse_buffer_log, weights_split)
-from .values import est, measured
+from .memcalc import (  # noqa: F401
+    ASSUMPTION_DOCS,
+    DEFAULT_ASSUMPTIONS,
+    GIB,
+    bytes_per_element,
+    compute_buffer_bytes,
+    kv_cache_bytes,
+    measured_tiers_gb,
+    norm_model,
+    parse_buffer_log,
+    weights_split,
+)
+from .values import est, measured, unavailable
 
 # Theoretical GPU memory bandwidth in GB/s (vendor spec sheets); first match wins. Unknown cards fall back to an assumption.
 _GPU_BW = [(r"750 ?ti", 86.4), (r"gtx 750", 80.0), (r"gtx 950", 105.7), (r"gtx 960", 112.0), (r"gtx 970", 224.0),
@@ -53,6 +63,9 @@ _CFG_KEYS = ("ctx_size", "n_gpu_layers", "n_cpu_moe", "cpu_moe", "kv_offload", "
              "ubatch_size", "mmap", "mlock", "flash_attn", "parallel", "op_offload", "swa_full")
 
 
+CFG_KEYS = _CFG_KEYS  # settings the planner reads; callers can pass just these
+
+
 def _effective_cfg(hw: dict, model: dict, cfg: dict | None, a: dict) -> dict:
     """cfg > tuner.recommend(hw, model) > planner assumptions > settings.DEFAULTS."""
     base = {k: settings.DEFAULTS[k] for k in _CFG_KEYS if k in settings.DEFAULTS}
@@ -77,6 +90,11 @@ def _num(v, default=0):
 
 
 # -------------------------------------------------------------------------------------------------- placement
+def _vram_fits(vram_bytes: float, budget_gb: float, a: dict) -> bool:
+    """VRAM check with the same safety margin as RAM (estimate error must not turn into an out-of-memory at load)."""
+    return vram_bytes / GIB * (1 + a["safety_margin_pct"] / 100) <= budget_gb + 1e-9
+
+
 def _place(m: dict, ws: dict, cfg: dict, ngl: int, kvl: dict, cb: int, a: dict, flash_attn: bool) -> dict:
     """Bytes per tier for one n_gpu_layers value. Pure arithmetic; used by plan() and max_gpu_layers()."""
     n = m["block_count"]
@@ -106,6 +124,36 @@ def _place(m: dict, ws: dict, cfg: dict, ngl: int, kvl: dict, cb: int, a: dict, 
             "vram": w_gpu + kv_gpu + cb_gpu + staging}
 
 
+def _autofit(m: dict, ws: dict, c: dict, given: set, kvl: dict, cb: int, a: dict, flash: bool, budget_gb: float) -> dict:
+    """Settings the caller did NOT specify, adjusted so the GPU placement fits: ``{"n_cpu_moe": k, "n_gpu_layers": g}``.
+
+    Values the caller passed are never touched (an overcommit there is a blocker). Only raises ``n_cpu_moe`` (more experts
+    stay in RAM) and lowers ``n_gpu_layers``; every change is announced in the plan's warnings.
+    """
+    n = m["block_count"]
+    if not n:
+        return {}
+
+    def fits(cc, ngl):
+        return _vram_fits(_place(m, ws, cc, ngl, kvl, cb, a, flash)["vram"], budget_gb, a)
+
+    cc, changed = dict(c), {}
+    ngl = _num(cc.get("n_gpu_layers"), 0)
+    if fits(cc, ngl):
+        return {}
+    if m["is_moe"] and not ({"n_cpu_moe", "cpu_moe"} & given) and not cc.get("cpu_moe"):
+        for k in range(_num(cc.get("n_cpu_moe"), 0) + 1, n + 1):
+            if fits({**cc, "n_cpu_moe": k}, ngl):
+                return {"n_cpu_moe": k}
+        cc["n_cpu_moe"] = n
+        changed["n_cpu_moe"] = n
+    if "n_gpu_layers" not in given:
+        for g in range(min(ngl if ngl >= 0 else n + 1, n + 1), -1, -1):
+            if fits(cc, g):
+                return {**changed, "n_gpu_layers": g}
+    return changed
+
+
 def _gpu_budget_gb(hw: dict, a: dict) -> tuple[dict | None, float, float]:
     """(gpu, vram_total_gb, usable_budget_gb). Cards under 1 GB are not used (same rule as tuner.py)."""
     gpus = [g for g in hw.get("gpus") or [] if g.get("vram_mb")]
@@ -126,6 +174,15 @@ def _context(m: dict, cfg: dict) -> tuple[int, str]:
     return train, f"ctx_size=0 makes llama.cpp use the model's full training context ({train} tokens)."
 
 
+def _norm_hw(hw: dict | None) -> dict:
+    """A hardware dict with every section present, so a partial one (detection failed) yields blockers, not KeyErrors."""
+    hw = dict(hw or {})
+    for key, empty in (("cpu", {}), ("ram", {}), ("gpus", []), ("disks", [])):
+        if not isinstance(hw.get(key), type(empty)):
+            hw[key] = empty
+    return hw
+
+
 def _build_context(hw: dict, model: dict, cfg: dict | None, assumptions: dict | None):
     """Everything plan() and the helpers share: assumptions, normalised model, effective settings, KV/compute sizes."""
     a = {**DEFAULT_ASSUMPTIONS, **(assumptions or {})}
@@ -135,7 +192,8 @@ def _build_context(hw: dict, model: dict, cfg: dict | None, assumptions: dict | 
     ub = max(_num(c.get("ubatch_size"), a["ubatch_default"]), 1)
     par = max(_num(c.get("parallel"), 1), 1)
     a_kv = {**a, "swa_full": bool(c.get("swa_full", a["swa_full"]))}
-    kvl = memcalc.kv_layout(m, ctx, str(c["cache_type_k"]), str(c["cache_type_v"]), a_kv, par, ub)
+    ktype, vtype = (t if str(t).lower() in memcalc._BPE else "f16" for t in (c["cache_type_k"], c["cache_type_v"]))
+    kvl = memcalc.kv_layout(m, ctx, str(ktype), str(vtype), a_kv, par, ub)  # invalid types are blocked in plan()
     flash = str(c.get("flash_attn", "auto")) != "off"
     cb = compute_buffer_bytes(m, ctx, ub, True, a, flash)
     return a, m, c, ctx, ctx_note, ub, kvl, flash, cb
@@ -153,7 +211,7 @@ def max_gpu_layers(hw: dict, model: dict, cfg: dict | None = None, assumptions: 
         return 0
     ws = weights_split(m, a)
     for ngl in range(n + 1, 0, -1):
-        if _place(m, ws, c, ngl, kvl, cb, a, flash)["vram"] / GIB <= budget:
+        if _vram_fits(_place(m, ws, c, ngl, kvl, cb, a, flash)["vram"], budget, a):
             return ngl
     return 0
 
@@ -173,8 +231,9 @@ def min_cpu_moe(hw: dict, model: dict, cfg: dict | None = None, assumptions: dic
         return 0
     ws = weights_split(m, a)
     c = {**c, "cpu_moe": False}
-    for k in range(0, n + 1):
-        if _place(m, ws, {**c, "n_cpu_moe": k}, n + 1, kvl, cb, a, flash)["vram"] / GIB <= budget:
+    ngl = _num(cfg["n_gpu_layers"], n + 1) if cfg and cfg.get("n_gpu_layers") is not None else n + 1
+    for k in range(n + 1):
+        if _vram_fits(_place(m, ws, {**c, "n_cpu_moe": k}, ngl, kvl, cb, a, flash)["vram"], budget, a):
             return k
     return None
 
@@ -208,7 +267,7 @@ def fits_vram(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict 
     _, _, budget = _gpu_budget_gb(hw, a)
     ngl = _num(c.get("n_gpu_layers"), 0) if budget > 0 else 0
     pl = _place(m, weights_split(m, a), c, ngl, kvl, cb, a, flash)
-    return pl["vram"] / GIB <= budget + 1e-9
+    return _vram_fits(pl["vram"], budget, a)
 
 
 def resident_estimate_gb(plan_result: dict) -> float:
@@ -243,6 +302,9 @@ def _speed(hw: dict, m: dict, ws: dict, pl: dict, kvl: dict, a: dict, gpu: dict 
     lo_t = (t_cpu + t_gpu) / a["speed_efficiency_lo"] + t_miss / a["storage_speed_lo"]
     hi_t = (t_cpu + t_gpu) / a["speed_efficiency_hi"] + t_miss / a["storage_speed_hi"]
     total = t_cpu + t_gpu + t_miss
+    if total <= 0:  # nothing to read: the model size is unknown, so no number is better than a made-up one
+        return {"tokens_per_s": unavailable("model size unknown", "planner"), "bound_by": "unknown",
+                "explanation": "Speed cannot be estimated without the model size.", "_active_gb": 0.0, "_active_gpu_gb": 0.0}
     if t_miss > 0.5 * total:
         bound = "storage"
     elif not hw["cpu"].get("avx2", True):
@@ -265,7 +327,8 @@ def _speed(hw: dict, m: dict, ws: dict, pl: dict, kvl: dict, a: dict, gpu: dict 
                      f"{disk} GB/s effective ({t_miss / total * 100:.0f}% of the time per token).")
     parts.append("Estimate only - the benchmark measures the real figure.")
     return {"tokens_per_s": est([lo, hi], "planner", "[pessimistic, optimistic] generation tokens/s"),
-            "bound_by": bound, "explanation": " ".join(parts)}
+            "bound_by": bound, "explanation": " ".join(parts), "_active_gb": (a_cpu + a_gpu) / GIB,
+            "_active_gpu_gb": a_gpu / GIB}
 
 
 # ------------------------------------------------------------------------------------------------ advice text
@@ -302,6 +365,7 @@ def plan(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict | Non
     (its file is not required to exist, the drive needs room for it). Result keys: model, config, requirements, tiers,
     placement, admission, speed, assumptions, status.
     """
+    hw = _norm_hw(hw)
     a, m, c, ctx, ctx_note, ub, kvl, flash, cb = _build_context(hw, model, cfg, assumptions)
     ws = weights_split(m, a)
     n, total = m["block_count"], m["size_bytes"]
@@ -357,13 +421,23 @@ def plan(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict | Non
     if not c.get("cpu_moe") and _num(c.get("n_cpu_moe"), 0) > 0 and not m["is_moe"]:
         warnings.append("n_cpu_moe has no effect: this is not a mixture-of-experts model.")
     pl = _place(m, ws, c, ngl, kvl, cb, a, flash)
+    given = {k for k, v in (cfg or {}).items() if v is not None}
+    if vram_budget > 0 and not _vram_fits(pl["vram"], vram_budget, a):
+        patch = _autofit(m, ws, c, given, kvl, cb, a, flash, vram_budget)
+        if patch:
+            warnings.append("Not set by you, so adjusted to fit the GPU: " + ", ".join(
+                f"{k} {c.get(k)} -> {v}" for k, v in patch.items()) + ".")
+            c.update(patch)
+            ngl = _num(c.get("n_gpu_layers"), 0)
+            pl = _place(m, ws, c, ngl, kvl, cb, a, flash)
     vram_gb = pl["vram"] / GIB
-    if vram_gb > vram_budget + 1e-9 and pl["vram"] > 0:
+    if pl["vram"] > 0 and not _vram_fits(pl["vram"], vram_budget, a):
         best = max_gpu_layers(hw, model, {**c, "n_gpu_layers": ngl_req}, assumptions)
         kmin = min_cpu_moe(hw, model, c, assumptions) if (m["is_moe"] and pl["w_gpu"] > pl["gpu_layers"] * ws["per_layer_shared_bytes"]
                                                          + (ws["output_bytes"] if pl["output_on_gpu"] else 0)) else None
-        blockers.append(f"Not enough VRAM for this placement: it needs {vram_gb:.2f} GB on the GPU but only "
-                        f"{vram_budget:.2f} GB are usable ({vram_total:.1f} GB card minus {a['vram_reserve_mb']} MB reserved).")
+        blockers.append(f"Not enough VRAM for this placement: it needs {vram_gb:.2f} GB on the GPU "
+                        f"(+{a['safety_margin_pct']:g}% safety margin = {vram_gb * (1 + a['safety_margin_pct'] / 100):.2f} GB) "
+                        f"but only {vram_budget:.2f} GB are usable ({vram_total:.1f} GB card minus {a['vram_reserve_mb']} MB reserved).")
         if kmin is not None and kmin > pl["k_cpu"]:
             suggestions.append(f"Raise n_cpu_moe to {kmin}: the experts of the first {kmin} layers stay in RAM and the "
                                "attention weights still run on the GPU.")
@@ -408,25 +482,29 @@ def plan(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict | Non
                f"other apps); {spill_fraction * 100:.0f}% of the weights ({spill:.1f} GB) would be paged from the {kind_txt}.")
         hints = [_smaller_quant_hint(m, (w_ram - spill) * GIB + pl["w_gpu"]), _kv_hint(m, ctx, kvl, spill)]
         suggestions.extend([h[0].upper() + h[1:] + "." if i == 0 else h for i, h in enumerate(hints) if h])
+        ram_sug = f"Installing {_ram_kit(need_ram + a['os_reserve_gb'])} GB of RAM would hold the whole model in memory."
         if not mmap_on or mlock_on:
             verdict = "reject"
             blockers.append(msg + " With mmap off or mlock on the weights cannot be paged, so the model would not load.")
             suggestions.append("Turn mmap on and mlock off to allow paging, or use a smaller model.")
+            suggestions.append(ram_sug)
         elif kind == "hdd" and spill_fraction > a["hdd_spill_tolerance"] and not force:
             verdict = "reject"
             blockers.append(msg + " On a hard drive that is unusably slow.")
             suggestions.append("Move the model to an SSD/NVMe drive (paging from SSD is ~12-45x faster than from a hard drive).")
+            suggestions.append(ram_sug)
         elif spill_fraction > a["max_spill_fraction"] and not force:
             verdict = "reject"
             blockers.append(msg + f" That is more than the {a['max_spill_fraction'] * 100:.0f}% limit.")
-            suggestions.append("Add RAM, or use a smaller model/quantization that fits in memory.")
+            suggestions.append(ram_sug)
+            suggestions.append("Or use a smaller model/quantization that fits in memory.")
         else:
             verdict = "paging"
             warnings.append(msg + (" Forced past the safety limits." if force and (
                 spill_fraction > a["max_spill_fraction"] or (kind == "hdd" and spill_fraction > a["hdd_spill_tolerance"])) else
                 " It will load but generate slowly."))
             suggestions.append("Close other applications to free RAM; keep the context small.")
-            suggestions.append(f"Installing {_ram_kit(need_ram + a['os_reserve_gb'])} GB of RAM would hold the whole model in memory.")
+            suggestions.append(ram_sug)
             if kind == "hdd":
                 suggestions.append("Move the model to an SSD/NVMe drive.")
     elif ram_budget <= 0 or headroom / ram_budget * 100 < a["headroom_ok_pct"]:
@@ -446,6 +524,7 @@ def plan(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict | Non
         warnings.append("This CPU has no AVX2; llama.cpp will be very slow.")
 
     speed = _speed(hw, m, ws, pl, kvl, a, gpu, kind, spill)
+    active_gb, active_gpu_gb = speed.pop("_active_gb"), speed.pop("_active_gpu_gb")
     if verdict == "reject":
         speed["explanation"] = "Not loadable as configured - " + speed["explanation"]
 
@@ -465,7 +544,7 @@ def plan(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict | Non
                  {"label": "KV cache in RAM", "gb": round(kv_ram_gb, 3)},
                  {"label": "compute buffer (host)", "gb": round(cb_host_gb, 3)},
                  {"label": "llama.cpp runtime", "gb": round(runtime, 3)}]
-    e = lambda v, note="": est(round(v, 3), "planner", note)  # noqa: E731
+    e = lambda v, note="": est(round(v, 3), "planner", note)
     result = {
         "model": {"name": m["name"] or Path(str(model.get("path") or "")).stem, "architecture": m["architecture"],
                   "size_gb": round(size_gb, 2), "is_moe": m["is_moe"], "block_count": n, "expert_count": m["expert_count"],
@@ -497,6 +576,8 @@ def plan(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict | Non
         "assumptions": _assumption_list(a, assumptions, m, ws, kvl, hw, gpu, kind, pl, cb),
         "status": "estimated",
     }
+    result["assumptions"].append({"key": "speed.active_gb_per_token", "value": {"total": round(active_gb, 3), "on_gpu": round(active_gpu_gb, 3)},
+                                  "explain": "Weight and KV bytes read per generated token (GiB); the basis of the speed estimate."})
     return result
 
 

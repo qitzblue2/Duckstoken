@@ -74,9 +74,13 @@ class TestPrewarm(unittest.TestCase):
             r = self.run_prewarm(self.file(), avail_ram_fn=fn)
             self.assertEqual((r["bytes_read"], r["stopped_because"]), (0, "ram_unknown"))
 
-    def test_zero_budget(self):
-        r = self.run_prewarm(self.file(), max_bytes=0)
-        self.assertEqual((r["bytes_read"], r["stopped_because"]), (0, "budget"))
+    def test_zero_or_none_means_no_cap_besides_free_ram(self):
+        for cap in (0, None, -5):
+            r = self.run_prewarm(self.file(size=2 * MB), max_bytes=cap)
+            self.assertTrue(r["completed"], cap)
+            self.assertEqual(r["bytes_read"], 2 * MB)
+        r = self.run_prewarm(self.file(size=2 * MB), max_bytes=0, avail_ram_fn=lambda: 4.0 + MB / 2**30, reserve_gb=4.0)
+        self.assertEqual((r["bytes_read"], r["stopped_because"]), (MB, "ram_headroom"))     # RAM still bounds it
 
     def test_cancel_midway(self):
         p = self.file(size=8 * MB)

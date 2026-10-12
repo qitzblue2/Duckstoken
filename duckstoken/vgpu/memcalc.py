@@ -50,7 +50,8 @@ DEFAULT_ASSUMPTIONS: dict = {
 ASSUMPTION_DOCS: dict = {
     "os_reserve_gb": "RAM kept for Windows and other applications. Subtracted from total RAM to get the model's budget.",
     "safety_margin_pct": "Extra margin on the model-related memory (weights + KV + compute + runtime), covering estimate "
-                         "error and allocator padding. It is not applied to the OS reserve.",
+                         "error and allocator padding. It is not applied to the OS reserve. The same percentage is added to "
+                         "the VRAM requirement before comparing it with the GPU budget.",
     "vram_reserve_mb": "VRAM not offered to the model: desktop compositor, driver and CUDA/Vulkan context.",
     "runtime_overhead_gb": "llama-server's own heap, tokenizer, sampler state and thread stacks (estimate).",
     "max_spill_fraction": "Largest fraction of the weights allowed to exceed the RAM+VRAM budget and be paged from "
@@ -90,7 +91,7 @@ ASSUMPTION_DOCS: dict = {
                              "experts-used x expert width for MoE; the MoE extension could not be validated here).",
     "compute_mask_bytes": "Bytes per attention-mask cell with flash attention (f16 mask, measured). Without flash "
                           "attention llama.cpp uses an f32 mask plus f32 score matrices for every head; that is "
-                          "measured to within +0/-15% at 4k context and exact in slope.",
+                          "an overestimate of 5-20% at 4k context (5% at 16k) and exact in slope.",
     "gpu_bandwidth_gbs": "Memory bandwidth of the GPU used for layers placed on it. None = look up by name, else assumed.",
 }
 
@@ -121,7 +122,11 @@ def norm_model(model: dict) -> dict:
         except (TypeError, ValueError):
             return default
 
-    size = i("size_bytes") or int(float(model.get("size_gb") or 0) * GIB)
+    try:
+        gb_size = int(float(model.get("size_gb") or 0) * GIB)
+    except (TypeError, ValueError):
+        gb_size = 0
+    size = i("size_bytes") or gb_size
     heads, kv_heads, embd = i("head_count"), i("head_count_kv"), i("embedding_length")
     experts = i("expert_count")
     key_len = i("key_length") or (embd // heads if heads and embd else 0)
@@ -269,7 +274,7 @@ def compute_buffer_bytes(model: dict, ctx: int, ubatch: int, on_gpu: bool = Fals
     cells = -(-max(int(ctx), 1) // int(a["kv_pad_cells"])) * int(a["kv_pad_cells"])
     if flash_attn:
         total += ub * cells * a["compute_mask_bytes"]
-    else:  # f32 mask + f32 KQ scores for every head; an upper bound at short context (measured +0..15%)
+    else:  # f32 mask + f32 KQ scores for every head; an upper bound at short context (measured +5..20%)
         total += ub * cells * (4 + 4 * max(m["head_count"], 1))
     return int(total)
 

@@ -186,6 +186,10 @@ class TestHistoryAndProfiles(StoreCase):
 
 
 class TestProfileKey(unittest.TestCase):
+    def test_available_as_module_function_and_as_store_method(self):
+        self.assertEqual(st.VGpuStore.profile_key(hw(), MODEL, "b"), st.profile_key(hw(), MODEL, "b"))
+        self.assertEqual(st.VGpuStore("/nonexistent/never/created").profile_key(hw(), MODEL, "b"), st.profile_key(hw(), MODEL, "b"))
+
     def test_stable_and_wellformed(self):
         a = st.profile_key(hw(), MODEL, "build 7")
         b = st.profile_key(hw(), dict(MODEL, path="/other/place.gguf"), "build 7")

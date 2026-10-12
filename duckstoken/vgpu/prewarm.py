@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import gguf, hardware
+from .lazy import module as _mod
 from .values import measured, unavailable
 
 MIB = 2**20
@@ -45,8 +46,10 @@ def _default_avail_gb() -> float | None:
 
 def _default_pressure() -> str | None:
     """Memory pressure level from the telemetry modules; None when they are unavailable."""
+    pressure, telemetry = _mod("pressure"), _mod("telemetry")
+    if pressure is None or telemetry is None:
+        return None
     try:
-        from . import pressure, telemetry
         return pressure.classify_pressure(telemetry.system_sample()).get("level")
     except Exception:  # noqa: BLE001 - monitoring must never break a prewarm
         return None
@@ -58,8 +61,9 @@ def prewarm(path_or_paths, max_bytes: int, cancel=None, progress: Callable | Non
             check_every_bytes: int = 256 * MIB) -> dict:
     """Read the GGUF file(s) sequentially into the OS page cache.
 
-    `avail_ram_fn()` returns available RAM in GB (default: the OS figure); `pressure_fn()` returns a pressure level
-    string ('ok'|'elevated'|'high'|'critical') or None.  Returns ``{"bytes_read", "seconds", "mb_per_s", "completed",
+    `max_bytes` caps the read (None or <= 0 means "no cap besides the free RAM", matching the "0 = as much as fits"
+    setting).  `avail_ram_fn()` returns available RAM in GB (default: the OS figure); `pressure_fn()` returns a pressure
+    level string ('ok'|'elevated'|'high'|'critical') or None.  Returns ``{"bytes_read", "seconds", "mb_per_s", "completed",
     "stopped_because", ...}``; ``stopped_because`` is None when everything was read, else one of ``budget`` (max_bytes
     reached), ``ram_headroom`` (all the free RAM minus the reserve was used), ``cancelled``, ``memory_pressure``,
     ``no_ram_headroom``, ``ram_unknown``, ``no_files``, ``read_error``.  Never raises for I/O problems.
@@ -92,11 +96,12 @@ def prewarm(path_or_paths, max_bytes: int, cancel=None, progress: Callable | Non
     if not avail or avail <= 0:
         return finish("ram_unknown")                      # cannot prove it fits: read nothing
     ram_limit = int(max(0.0, avail - float(reserve_gb)) * GIB)
-    limit = min(int(max_bytes), ram_limit, total)
+    cap = int(max_bytes) if max_bytes is not None and int(max_bytes) > 0 else None
+    limit = min(cap if cap is not None else total, ram_limit, total)
     result["limit_bytes"] = limit
-    bound_by = "budget" if int(max_bytes) <= ram_limit else "ram_headroom"
+    bound_by = "budget" if cap is not None and cap <= ram_limit else "ram_headroom"
     if limit <= 0:
-        return finish("no_ram_headroom" if ram_limit <= 0 else "budget")
+        return finish("no_ram_headroom")
 
     buf = bytearray(chunk)
     view = memoryview(buf)

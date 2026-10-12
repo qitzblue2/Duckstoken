@@ -169,7 +169,9 @@ def compare_quants(model_or_params, hw: dict, ctx: int = 4096, assumptions: dict
 
     Everything is an estimate (`file_gb` assumes the uniform bits-per-weight of the table); no quality number is given.
     """
-    from . import planner  # late import: planner imports this module for the bits-per-weight table
+    from . import (
+        planner,  # late import: planner imports this module for the bits-per-weight table
+    )
 
     params, how = parameter_count(model_or_params)
     base = dict(model_or_params) if isinstance(model_or_params, dict) else {}

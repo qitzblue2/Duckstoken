@@ -5,8 +5,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from duckstoken import hardware  # noqa: E402
-from duckstoken.vgpu import hwmodel  # noqa: E402
+from duckstoken import hardware
+from duckstoken.vgpu import hwmodel
 
 CPU_KEYS = {"name", "physical_cores", "logical_cores", "avx2", "avx512"}
 RAM_KEYS = {"total_gb", "avail_gb", "speed_mts", "sticks", "bandwidth_gbs"}

@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from duckstoken.vgpu import hwmodel, quant  # noqa: E402
+from duckstoken.vgpu import hwmodel, quant
 
 GIB = 2**30
 # A 7B-class dense model (Llama-2-7B shape) at Q4_K_M.

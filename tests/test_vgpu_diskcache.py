@@ -348,7 +348,7 @@ class TestStage(StagingBase):
         p = self.model()
         self.cache.stage(p, confirm=True)
         t0 = self.cache.list()[0]["last_used"]
-        with mock.patch("duckstoken.vgpu.diskcache.time.time", return_value=t0 + 500):
+        with mock.patch("duckstoken.vgpu.staging.time.time", return_value=t0 + 500):
             self.cache.lookup(p)
         self.assertEqual(self.cache.list()[0]["last_used"], t0 + 500)
 
@@ -372,7 +372,7 @@ class TestStage(StagingBase):
 
     def test_disk_full_during_copy_cleans_up(self):
         p = self.model()
-        with mock.patch("duckstoken.vgpu.diskcache.os.fsync", side_effect=OSError(errno.ENOSPC, "No space left on device")):
+        with mock.patch("duckstoken.vgpu.staging.os.fsync", side_effect=OSError(errno.ENOSPC, "No space left on device")):
             r = self.cache.stage(p, confirm=True)
         self.assertFalse(r["ok"])
         self.assertEqual(r["code"], "disk_full")
@@ -382,7 +382,7 @@ class TestStage(StagingBase):
 
     def test_other_io_error_is_reported_not_raised(self):
         p = self.model()
-        with mock.patch("duckstoken.vgpu.diskcache.os.fsync", side_effect=OSError(errno.EIO, "I/O error")):
+        with mock.patch("duckstoken.vgpu.staging.os.fsync", side_effect=OSError(errno.EIO, "I/O error")):
             r = self.cache.stage(p, confirm=True)
         self.assertEqual(r["code"], "io_error")
         self.assertEqual([t for t in self.tree() if t != "manifest.json"], [])
@@ -494,7 +494,7 @@ class TestEvictionAndSafety(StagingBase):
         a, b, c = self.model("a.gguf", 3 * MB), self.model("b.gguf", 3 * MB, fill=b"bbb"), self.model("c.gguf", 3 * MB, fill=b"ccc")
         ra, rb = cache.stage(a, confirm=True), cache.stage(b, confirm=True)
         self.assertTrue(ra["ok"] and rb["ok"])
-        with mock.patch("duckstoken.vgpu.diskcache.time.time", return_value=time_future()):
+        with mock.patch("duckstoken.vgpu.staging.time.time", return_value=time_future()):
             cache.lookup(a)                                     # a is now more recent than b
         rc = cache.stage(c, confirm=True)
         self.assertTrue(rc["ok"], rc)
