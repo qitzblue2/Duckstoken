@@ -50,6 +50,8 @@ class VGpuRuntime:
         self.monitor = pressure.Monitor(self.sampler, app.settings.all, on_event=self._on_pressure)
         self.watchdog = CrashWatchdog(app.server, app.settings.all, perflog=self.perflog, on_event=self._on_crash)
         self.pressure_events: list[dict] = []
+        self.last_autofit: dict | None = None  # set when the last start lowered the GPU split to fit VRAM
+        self.last_start_plan: dict | None = None
         self.prewarm_state: dict = {"state": "idle", "message": ""}
         self._prewarm_cancel = threading.Event()
         self._prewarm_thread: threading.Thread | None = None
@@ -154,14 +156,23 @@ class VGpuRuntime:
 
     def admit(self, s: dict, force: bool = False) -> dict | None:
         """The load gate. Returns the plan (or None when checking is off / not applicable); raises ApiError(409) with the
-        admission details when the planner says the model cannot load and the user has not forced it."""
+        admission details when the planner says the model cannot load and the user has not forced it.
+
+        When the *only* problem is GPU offload larger than the card (typical: a preset saying "offload everything" on a 2 GB
+        GPU) and `vgpu_autofit` is on, the plan carries ``plan["autofit"]`` = the lower n_gpu_layers / n_cpu_moe that do fit;
+        `start_server` uses them for that start only."""
         mode = s.get("vgpu_admission", "enforce")
         path = s.get("model_path", "")
         if mode == "off" or s.get("engine") != "llamacpp" or not path or not Path(path).is_file():
             return None
         try:
             model = self.app.model_info(path)
-            plan, _, _ = self.plan(model, settings_cfg(s), model_path=path, force=force)
+            cfg = settings_cfg(s)
+            plan, what_if, hw = self.plan(model, cfg, model_path=path, force=force)
+            if not plan["admission"]["can_load"] and s.get("vgpu_autofit", True) and not force:
+                fixed = self._autofit(hw, model, cfg, plan, path)
+                if fixed is not None:
+                    plan = fixed
         except ApiError:
             raise
         except Exception as e:  # noqa: BLE001 - the planner must never be the reason a model cannot start
@@ -169,23 +180,49 @@ class VGpuRuntime:
             return None
         adm = plan["admission"]
         self.perflog.log("admission", model=model.get("name"), verdict=adm["verdict"], can_load=adm["can_load"], mode=mode,
-                         blockers=adm["blockers"][:3])
+                         blockers=adm["blockers"][:3], autofit=(plan.get("autofit") or {}).get("overrides"))
         if not adm["can_load"] and mode == "enforce" and not force:
             msg = "Duckstoken does not expect this model to load on this PC with the current settings: " + "; ".join(adm["blockers"][:2])
             self.record_failure("admission_rejected", msg, model=model.get("name"), verdict=adm["verdict"])
             raise ApiError(msg, 409, admission=adm)
         return plan
 
+    def _autofit(self, hw: dict, model: dict, cfg: dict, plan: dict, path: str) -> dict | None:
+        """A plan that loads after lowering only the GPU split, or None (then the original blockers stand)."""
+        if int(cfg.get("n_gpu_layers") or 0) == 0:
+            return None
+        place = planner.suggest_placement(hw, model, cfg, assumptions_from_settings(self.app.settings.all()))
+        over = {"n_gpu_layers": place["n_gpu_layers"], "n_cpu_moe": place["n_cpu_moe"]}
+        if over["n_gpu_layers"] > int(cfg.get("n_gpu_layers") or 0) and over["n_cpu_moe"] >= int(cfg.get("n_cpu_moe") or 0):
+            return None  # this would offload more than the user asked for: never do that automatically
+        fixed, _, _ = self.plan(model, {**cfg, **over}, model_path=path)
+        if not fixed["admission"]["can_load"]:
+            return None
+        fixed["autofit"] = {"overrides": over, "reason": place["reason"],
+                            "was": {"n_gpu_layers": cfg.get("n_gpu_layers"), "n_cpu_moe": cfg.get("n_cpu_moe")},
+                            "message": f"The GPU cannot hold that much: using {over['n_gpu_layers']} GPU layers and {over['n_cpu_moe']} "
+                                       f"expert layers in RAM for this start ({place['reason']}). Your saved settings are unchanged."}
+        return fixed
+
     # ------------------------------------------------------- server control
     def start_server(self, s: dict, force: bool = False) -> None:
         """Gate, optionally substitute a staged copy of the model, optionally prewarm the page cache, then start."""
-        self.admit(s, force)
+        plan = self.admit(s, force)
         s = dict(s)
-        staging = self.staging()
-        if staging is not None and s.get("model_path"):
-            staged = staging.lookup(s["model_path"])
+        self.last_autofit = None
+        if plan and plan.get("autofit"):
+            s.update(plan["autofit"]["overrides"])
+            self.last_autofit = plan["autofit"]
+        self.last_start_plan = plan
+        if self._prewarm_thread and self._prewarm_thread.is_alive():
+            raise ApiError("The model is already being prepared to start. Press Stop to cancel it first.", 409)
+        try:
+            staging = self.staging()
+            staged = staging.lookup(s["model_path"]) if staging is not None and s.get("model_path") else None
             if staged:
                 s["model_path"] = staged
+        except Exception as e:  # noqa: BLE001 - the staging cache is an optional accelerator, never a reason not to start
+            self.perflog.log("staging_lookup_failed", error=f"{e.__class__.__name__}: {e}")
         self.watchdog.note_start(s)
         if s.get("vgpu_prewarm") == "before_start" and s.get("engine") == "llamacpp" and s.get("model_path"):
             self._prewarm_cancel = threading.Event()

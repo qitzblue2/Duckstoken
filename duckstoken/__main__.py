@@ -11,8 +11,12 @@ def main() -> None:
     ap.add_argument("--minimized", action="store_true", help="start hidden in the system tray")
     ap.add_argument("--port", type=int, help="UI port (default 8765)")
     ap.add_argument("--data-dir", help="where settings/engines are stored")
+    ap.add_argument("--selftest", metavar="FILE", help="check that this build contains everything it needs, write a JSON report to FILE and exit")
     ap.add_argument("--version", action="version", version=f"duckstoken {__version__}")
     a = ap.parse_args()
+    if a.selftest:
+        from . import selftest
+        raise SystemExit(selftest.run(a.selftest))
     if a.data_dir:
         os.environ["DUCKSTOKEN_HOME"] = a.data_dir
     from .app import run

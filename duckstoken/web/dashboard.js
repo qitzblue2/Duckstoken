@@ -124,6 +124,7 @@ const Dashboard = {
       const r = await api('server/' + action, force ? { force: true } : {});
       S.runningSnapshot = { ...S.values }; S.dirty.clear(); updateDirtyBanner();
       toast(action === 'stop' ? 'Stopped' : 'Starting… large models can take minutes to load', 'ok');
+      if (r.autofit) toast(r.autofit.message, '');
     } catch (e) {
       const adm = e.data && e.data.admission;
       if (adm) {

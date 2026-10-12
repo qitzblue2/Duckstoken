@@ -9,6 +9,7 @@
 [Setup]
 AppId={{6B1F4E0A-3C52-4D4E-9B6B-D0C57570CE01}
 AppName=Duckstoken
+SetupMutex=DuckstokenSetupMutex
 AppVersion={#AppVersion}
 AppPublisher=Duckstoken contributors
 AppPublisherURL=https://github.com/qitzblue2/Duckstoken

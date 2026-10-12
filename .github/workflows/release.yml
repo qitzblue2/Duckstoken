@@ -38,9 +38,14 @@ jobs:
       - name: Build portable Duckstoken.exe
         run: |
           python tools/stamp_build.py --sha $env:GITHUB_SHA --installer 0
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name Duckstoken --icon assets\duckstoken.ico `
-            --add-data "duckstoken/web;duckstoken/web" --add-data "engine;engine" `
-            --hidden-import pystray._win32 --collect-data webview duckstoken_launcher.py
+          python tools/build_exe.py onefile
+      - name: Self-test the portable exe (native window code, tray, bundled engine all inside the exe)
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\selftest-portable.json"
+          $p = Start-Process -FilePath dist\Duckstoken.exe -ArgumentList "--selftest",$out -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out } else { Write-Warning "the exe wrote no report" }
+          if ($p.ExitCode -ne 0) { throw "portable exe self-test failed (see the report above)" }
       - name: Smoke test portable exe
         shell: pwsh
         run: |
@@ -57,9 +62,7 @@ jobs:
       - name: Build installer payload (folder build)
         run: |
           python tools/stamp_build.py --sha $env:GITHUB_SHA --installer 1
-          python -m PyInstaller --noconfirm --clean --onedir --windowed --name Duckstoken --icon assets\duckstoken.ico `
-            --distpath dist-installer --add-data "duckstoken/web;duckstoken/web" --add-data "engine;engine" `
-            --hidden-import pystray._win32 --collect-data webview duckstoken_launcher.py
+          python tools/build_exe.py onedir --distpath dist-installer
       - name: Compile installer
         shell: pwsh
         run: |
@@ -74,6 +77,10 @@ jobs:
           Start-Process -FilePath dist-installer\Duckstoken-Setup.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=$dir" -Wait
           if (-not (Test-Path "$dir\Duckstoken.exe")) { throw "installer did not install the app" }
           if (-not (Test-Path "$dir\_internal\engine\llama-server.exe")) { throw "engine is missing from the installed app" }
+          $out = "$env:RUNNER_TEMP\selftest-installed.json"
+          $t = Start-Process -FilePath "$dir\Duckstoken.exe" -ArgumentList "--selftest",$out -Wait -PassThru
+          if (Test-Path $out) { Get-Content $out } else { Write-Warning "the installed app wrote no report" }
+          if ($t.ExitCode -ne 0) { throw "installed app self-test failed (see the report above)" }
           $p = Start-Process -FilePath "$dir\Duckstoken.exe" -ArgumentList "--headless","--port","18998","--data-dir","$env:RUNNER_TEMP\duck2" -PassThru
           $ok = $false
           foreach ($i in 1..20) {

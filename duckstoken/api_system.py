@@ -112,6 +112,7 @@ class SystemApi:
             result = updater.apply(Path(st["downloaded"]), restart=bool(b.get("restart", True)))
         except updater.UpdateError as e:
             raise ApiError(str(e)) from e
+        APP.updater.mark_applied()  # shutdown() must not launch the installer a second time
         threading.Timer(0.8, APP.shutdown).start()  # let this response reach the browser first
         return {"applied": True, **result}
 
@@ -140,6 +141,7 @@ def apply_on_exit(app) -> None:
     try:
         st = app.updater.status()
         if st["downloaded"] and updater.current_info()["frozen"]:
+            app.updater.mark_applied()
             updater.apply(Path(st["downloaded"]), restart=False)
     except Exception:  # noqa: BLE001
         pass

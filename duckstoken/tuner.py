@@ -6,7 +6,11 @@ All numbers here are heuristics. They exist to steer people away from setups tha
 
 from __future__ import annotations
 
+import threading
+
 from . import hardware
+
+_planning = threading.local()  # set while the memory planner is asked for a placement: it calls recommend() again
 
 OS_RESERVE_GB = 6.0  # Windows + browser + friends
 
@@ -102,7 +106,7 @@ def resolve_backend(hw: dict, preference: str = "auto") -> str:
     return "cuda" if any(g.get("vendor") == "NVIDIA" for g in gpus) else "vulkan"
 
 
-def recommend(hw: dict, model: dict | None, backend: str = "auto") -> dict:
+def recommend(hw: dict, model: dict | None, backend: str = "auto", placement: bool = True) -> dict:
     """Return {'values': {...settings patch}, 'notes': [...]}."""
     cpu, ram, gpus = hw["cpu"], hw["ram"], hw["gpus"]
     vram_gb = max((g["vram_mb"] for g in gpus), default=0) / 1024
@@ -115,34 +119,34 @@ def recommend(hw: dict, model: dict | None, backend: str = "auto") -> dict:
     size = model["size_gb"] if model else 0
     fits_ram = size and size <= max(ram["total_gb"] - OS_RESERVE_GB, 1)
 
+    placement = placement and not getattr(_planning, "busy", False)  # the planner's own defaults must not recurse into it
+    ctx_budget = 0
+    if model:
+        ctx_budget = 4096 if not fits_ram else (8192 if ram["total_gb"] < 32 else 16384)
+        if model["context_length"]:
+            ctx_budget = min(ctx_budget, model["context_length"])
+
     if not use_gpu:
         v.update(n_gpu_layers=0, n_cpu_moe=0, kv_offload=False)
         notes.append("No usable GPU backend -> running everything on the CPU.")
     else:
         v.update(n_gpu_layers=99, kv_offload=vram_gb >= 6)
-        if model and model["is_moe"]:
-            layers = model["block_count"] or 36
-            # Keep experts in RAM on small cards; big cards keep some experts on GPU.
-            n_cpu = layers if vram_gb < 12 else max(layers - int(vram_gb * 1.2), 0)
-            v["n_cpu_moe"] = n_cpu
-            notes.append(f"MoE model: experts of {n_cpu}/{layers} layers stay in RAM, attention runs on the GPU.")
-            shared_gb = size * 0.05  # attention + embeddings, rough
-            usable = vram_gb - 0.6
-            if usable < shared_gb:
-                v["n_gpu_layers"] = max(int(layers * usable / shared_gb), 0)
-                notes.append(f"Only ~{vram_gb:.1f} GB VRAM: {v['n_gpu_layers']}/{layers} layers' shared weights go "
-                             "on the GPU, the rest on the CPU.")
-        elif model and not model["is_moe"]:
-            v["n_cpu_moe"] = 0
-            if size > vram_gb:
-                est_layers = model["block_count"] or 32
-                v["n_gpu_layers"] = max(int((vram_gb - 0.8) / size * est_layers), 0)
-                notes.append(f"Dense model bigger than VRAM: {v['n_gpu_layers']}/{est_layers} layers on GPU.")
+        if model and placement:
+            # Ask the memory planner for a layout that really fits this card (it knows the model's real per-layer expert
+            # size); a fixed "layers per GB" rule put twice the VRAM of gpt-oss-120b on the card.
+            _planning.busy = True
+            try:
+                from .vgpu import planner  # imported here: planner.py imports this module
+                place = planner.suggest_placement(hw, model, {"ctx_size": ctx_budget, "kv_offload": v["kv_offload"]})
+                v.update(n_gpu_layers=place["n_gpu_layers"], n_cpu_moe=place["n_cpu_moe"])
+                notes.append(place["reason"])
+            except Exception:  # noqa: BLE001 - never leave the user with a layout we could not check
+                v.update(n_gpu_layers=0, n_cpu_moe=0)
+                notes.append("Could not plan the GPU split, so everything runs on the CPU.")
+            finally:
+                _planning.busy = False
 
     if model:
-        ctx_budget = 4096 if not fits_ram else (8192 if ram["total_gb"] < 32 else 16384)
-        if model["context_length"]:
-            ctx_budget = min(ctx_budget, model["context_length"])
         v["ctx_size"] = ctx_budget
         v["mmap"] = True
         v["mlock"] = bool(fits_ram and size < ram["total_gb"] * 0.6)

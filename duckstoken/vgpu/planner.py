@@ -387,7 +387,9 @@ def plan(hw: dict, model: dict, cfg: dict | None = None, assumptions: dict | Non
 
     # ---- storage / file checks
     disks = hw.get("disks") or []
-    disk = hardware.disk_for_path(model_path, disks) if model_path else (disks[0] if len(disks) == 1 else None)
+    # A what-if machine has its own drive: the real model path's drive letter (C:, D: ...) says nothing about it.
+    disk = (disks[0] if disks else None) if hw.get("mock") else (
+        hardware.disk_for_path(model_path, disks) if model_path else (disks[0] if len(disks) == 1 else None))
     kind, drive = (disk or {}).get("kind", "unknown"), (disk or {}).get("drive", "?")
     free = (disk or {}).get("free_gb")
     size_gb = total / GIB

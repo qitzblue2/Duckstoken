@@ -21,8 +21,10 @@ _VRAM_OOM = re.compile(r"cudamalloc failed|out of memory|failed to allocate .*(c
 _RAM_OOM = re.compile(r"unable to allocate|failed to allocate|bad_alloc|cannot allocate memory|"
                       r"not enough memory|std::bad_alloc|insufficient memory|\bkilled\b", re.I)
 _DEVICE = re.compile(r"cuda|vulkan|\bhip\b|\bgpu\b|device", re.I)
-_BAD_MODEL = re.compile(r"unknown model architecture|failed to load model|error loading model|invalid magic|"
-                        r"tensor .* data is not within the file|unsupported (tensor|gguf)", re.I)
+# Specific causes only: llama.cpp wraps *every* failed load in "error loading model / failed to load model", including plain
+# out-of-memory, so those generic lines must not decide anything.
+_BAD_MODEL = re.compile(r"unknown model architecture|invalid magic|tensor .* data is not within the file|unsupported (tensor|gguf)|"
+                        r"unknown gguf|gguf_init_from_file.*failed|wrong magic|not a gguf|unsupported .*quantization", re.I)
 
 
 def classify_crash(lines: list[str], exit_code: int | None = None) -> dict:
@@ -30,12 +32,13 @@ def classify_crash(lines: list[str], exit_code: int | None = None) -> dict:
     tail = lines[-200:]
     text = "\n".join(tail)
     kind, why = "unknown", "The server stopped without saying why. See the log."
-    if _BAD_MODEL.search(text):
-        kind, why = "bad_model", "The engine could not read this model (unsupported architecture or a damaged file). Restarting will not help."
-    elif any(_VRAM_OOM.search(ln) and _DEVICE.search(ln) for ln in tail):
+    # Out-of-memory first: it is the commonest reason a big model fails to load, and it is fixable by restarting smaller.
+    if any(_VRAM_OOM.search(ln) and _DEVICE.search(ln) for ln in tail):
         kind, why = "vram_oom", "The graphics card ran out of memory."
     elif _RAM_OOM.search(text) or exit_code in (137, -9):
         kind, why = "ram_oom", "The PC ran out of memory (or Windows/Linux killed the server to protect itself)."
+    elif _BAD_MODEL.search(text):
+        kind, why = "bad_model", "The engine could not read this model (unsupported architecture or a damaged file). Restarting will not help."
     return {"kind": kind, "why": why, "exit_code": exit_code}
 
 

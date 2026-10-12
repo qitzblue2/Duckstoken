@@ -304,6 +304,9 @@ SCHEMA: list[dict] = [
     _s("vgpu_admission", "Check a model before loading it", "vgpu", "select", "enforce",
        "enforce = refuse loads that cannot work (you can still force). warn = show the problems but load anyway. off = no check.",
        options=["enforce", "warn", "off"]),
+    _s("vgpu_autofit", "Reduce GPU offload automatically when it would not fit in VRAM", "vgpu", "bool", True,
+       "If the only thing stopping a model from loading is GPU offload bigger than your card's VRAM, Duckstoken lowers "
+       "n_gpu_layers / n_cpu_moe for that start only and tells you. Your saved settings are not changed."),
     _s("vgpu_os_reserve_gb", "Memory kept free for Windows and other apps (GB)", "vgpu", "float", 6.0,
        "The planner never hands this memory to the model.", min=0, max=128),
     _s("vgpu_safety_margin_pct", "Safety margin on the estimate (%)", "vgpu", "float", 5.0, min=0, max=50),

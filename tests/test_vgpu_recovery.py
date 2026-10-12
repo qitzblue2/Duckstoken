@@ -50,8 +50,24 @@ class Classify(unittest.TestCase):
         lines = ["ggml_cuda_init: found 1 CUDA devices:", "  Device 0: NVIDIA GeForce GTX 750", "llama_model_load: unable to allocate 60000 MiB"]
         self.assertEqual(classify_crash(lines)["kind"], "ram_oom")
 
+    def test_load_time_oom_is_not_blamed_on_the_model(self):
+        # real llama.cpp tails: every failed load ends with the generic "failed to load model" wrapper lines
+        cuda = ["ggml_backend_cuda_buffer_type_alloc_buffer: allocating 1900 MiB on device 0: cudaMalloc failed: out of memory",
+                "alloc_tensor_range: failed to allocate CUDA0 buffer of size 1992294400",
+                "llama_model_load: error loading model: unable to allocate CUDA0 buffer",
+                "llama_model_load_from_file_impl: failed to load model",
+                "srv    load_model: failed to load model, 'gpt-oss-120b.gguf'"]
+        self.assertEqual(classify_crash(cuda)["kind"], "vram_oom")
+        cpu = ["llama_model_load: error loading model: unable to allocate CPU buffer",
+               "llama_model_load_from_file_impl: failed to load model"]
+        self.assertEqual(classify_crash(cpu)["kind"], "ram_oom")
+
+    def test_generic_load_failure_without_a_cause_is_unknown_not_bad_model(self):
+        self.assertEqual(classify_crash(["llama_model_load_from_file_impl: failed to load model"])["kind"], "unknown")
+
     def test_bad_model_and_unknown(self):
         self.assertEqual(classify_crash(["llama_model_load: error loading model: unknown model architecture: 'foo'"])["kind"], "bad_model")
+        self.assertEqual(classify_crash(["gguf_init_from_file: invalid magic characters"])["kind"], "bad_model")
         self.assertEqual(classify_crash(["hello"])["kind"], "unknown")
 
 

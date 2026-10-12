@@ -344,6 +344,26 @@ class TestStage(StagingBase):
         Path(r["path"]).unlink()
         self.assertIsNone(self.cache.lookup(p))
 
+    def test_lookup_survives_a_manifest_that_cannot_be_saved(self):
+        # review finding: StoreError (not OSError) escaped lookup() and blocked starting the model server
+        from unittest import mock
+        from duckstoken.vgpu.store import StoreError
+        p = self.model()
+        self.assertTrue(self.cache.stage(p, confirm=True)["ok"])
+        with mock.patch.object(self.cache, "_save", side_effect=StoreError("cannot write manifest.json: [Errno 28] No space left")):
+            staged = self.cache.lookup(p)
+        self.assertIsNotNone(staged)
+        self.assertTrue(Path(staged).is_file())
+
+    def test_stage_reports_an_unwritable_manifest_instead_of_raising(self):
+        from unittest import mock
+        from duckstoken.vgpu.store import StoreError
+        p = self.model()
+        with mock.patch.object(self.cache, "_save", side_effect=StoreError("cannot write manifest.json")):
+            r = self.cache.stage(p, confirm=True)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["code"], "io_error")
+
     def test_lookup_bumps_last_used(self):
         p = self.model()
         self.cache.stage(p, confirm=True)

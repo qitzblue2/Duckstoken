@@ -469,6 +469,10 @@ def _conclude(out: dict, best: dict, why: str, objective: str, hw: dict, spec, s
                "vs_baseline": out["best"].get("vs_baseline"), "estimated_only": False, "applied": False, "previous": None}
     if store is not None:
         try:
+            # Keep what Undo needs: a re-run must not erase the original values recorded when an earlier result was applied.
+            old = store.get_profile(key) or {}
+            if old.get("applied") and old.get("previous"):
+                profile.update(applied=True, applied_at=old.get("applied_at"), previous=old["previous"])
             saved = store.save_profile(key, profile)
             out["best"]["profile_saved"] = True
             profile = saved

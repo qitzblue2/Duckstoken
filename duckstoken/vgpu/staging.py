@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import gguf, hardware
-from .store import atomic_write_text
+from .store import StoreError, atomic_write_text
 from .values import measured, unavailable
 
 GIB = 2**30
@@ -187,7 +187,7 @@ class StagingCache:
                 entry["last_used"] = time.time()
                 try:
                     self._save(manifest)
-                except OSError:
+                except (OSError, StoreError):
                     pass
             files = self._entry_files(name, entry)
             return str(files[0][0]) if files else None
@@ -305,7 +305,7 @@ class StagingCache:
             if known:
                 try:
                     self._save(manifest)
-                except OSError as e:
+                except (OSError, StoreError) as e:
                     return _fail("io_error", f"could not update the manifest: {e}")
         if ok:
             return {"ok": True, "freed_bytes": freed}
@@ -338,7 +338,7 @@ class StagingCache:
             n = self._cleanup_partials(manifest)
             try:
                 self._save(manifest)
-            except OSError:
+            except (OSError, StoreError):
                 pass
         return {"removed": n}
 
@@ -385,6 +385,8 @@ class StagingCache:
             return _fail("busy", "Another staging copy is already running.")
         try:
             return self._stage_locked(src, progress, cancel, hw, verify_edges)
+        except StoreError as e:                  # the manifest could not be written (disk full, read-only, locked)
+            return _fail("io_error", str(e))
         finally:
             self._stage_lock.release()
 
@@ -512,5 +514,5 @@ class StagingCache:
             manifest["pending"] = [x for x in manifest["pending"] if x not in wanted]
             try:
                 self._save(manifest)
-            except OSError:
+            except (OSError, StoreError):
                 pass

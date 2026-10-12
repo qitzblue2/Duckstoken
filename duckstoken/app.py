@@ -59,6 +59,9 @@ class App:
         self.tools = ToolRunner(self.settings.all, memory=self.memory, web=websearch)
         self.updater = updater.UpdateChecker(self.settings.all, paths.data_dir())
         self.update_job = UpdateJob()
+        self.shell = None  # the native window/tray (set by run()); shutdown() must end it or the process lives on
+        self._shutdown_lock = threading.Lock()
+        self._shut_down = False
         self.last_request: dict = {}  # speed of the latest chat reply (measured), shown on the Dashboard
         self.meta_cache = BoundedCache(max_bytes=4 << 20, max_items=64)  # parsed GGUF headers (bounded, with hit/miss stats)
         self.vgpu = VGpuRuntime(self)
@@ -176,6 +179,11 @@ class App:
                 "note": "Read speed may be inflated by the Windows file cache; treat it as an upper bound."}
 
     def shutdown(self) -> None:
+        """Stop everything and end the process. Runs once: the window, `run()` and signal handlers may all call it."""
+        with self._shutdown_lock:
+            if self._shut_down:
+                return
+            self._shut_down = True
         self.worker.stop()
         self.vgpu.stop()
         api_system.apply_on_exit(self)
@@ -184,6 +192,12 @@ class App:
             self.big.stop()
         if self.httpd:
             threading.Thread(target=self.httpd.shutdown, daemon=True).start()
+        shell = self.shell
+        if shell is not None:  # makes Shell.run() return; without this Quit / "Install & restart" left the process running
+            try:
+                shell.quit()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 APP = App()
@@ -462,7 +476,7 @@ class Handler(VGpuApi, SystemApi, LearningApi, BaseHTTPRequestHandler):
             APP.vgpu.start_server(APP.settings.all(), force=bool(b.get("force")))
         except RuntimeError as e:
             raise ApiError(str(e)) from e
-        return {"server": APP.server.status()}
+        return {"server": APP.server.status(), "autofit": APP.vgpu.last_autofit}
 
     def api_server_stop(self, q, b):
         APP.vgpu.stop_server()
@@ -651,6 +665,7 @@ def run(open_browser: bool | None = None, port: int | None = None, headless: boo
             signal.signal(getattr(signal, name), lambda *_: APP.shutdown())
     try:
         shell = None if headless or open_browser is False else _make_shell(url, minimized)
+        APP.shell = shell
         if shell is not None:
             shell.run()  # blocks until the user quits from the window or the tray
         else:

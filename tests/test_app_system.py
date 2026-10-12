@@ -80,5 +80,55 @@ class UpdateEndpoints(ti.Api):
         self.assertIn("GitHub is down", r["error"])
 
 
+class Shutdown(unittest.TestCase):
+    """Review findings: Quit / 'Install & restart' left the process alive, and auto-install ran Setup.exe twice."""
+
+    def test_shutdown_runs_once_and_ends_the_native_shell(self):
+        a = appmod.App()  # App() binds itself into the api_* modules; give them the shared instance back afterwards
+        self.addCleanup(a.db.close)
+        self.addCleanup(lambda: [m.bind(appmod.APP) for m in (appmod.api_learning, appmod.api_system, appmod.api_vgpu)])
+        calls = []
+
+        class FakeShell:
+            def quit(self):
+                calls.append("quit")
+
+        a.shell = FakeShell()
+        with mock.patch.object(appmod.api_system, "apply_on_exit", side_effect=lambda app: calls.append("apply")):
+            a.shutdown()
+            a.shutdown()  # Shell.run's finally and run()'s finally both call it
+        self.assertEqual(calls.count("quit"), 1)
+        self.assertEqual(calls.count("apply"), 1)
+
+    def test_auto_install_launches_the_installer_only_once(self):
+        from duckstoken import api_system
+
+        class FakeUpdater:
+            def __init__(self):
+                self.downloaded = "C:/x/Duckstoken-Setup.exe"
+                self.applied = 0
+
+            def status(self):
+                return {"downloaded": self.downloaded}
+
+            def mark_applied(self):
+                self.downloaded = None
+
+        class FakeApp:
+            updater = FakeUpdater()
+
+            class settings:
+                @staticmethod
+                def get(k, d=None):
+                    return k == "update_auto_install"
+
+        launched = []
+        with mock.patch.object(api_system.updater, "apply", side_effect=lambda p, restart=True: launched.append(str(p))), \
+                mock.patch.object(api_system.updater, "current_info", return_value={"frozen": True}):
+            api_system.apply_on_exit(FakeApp)
+            api_system.apply_on_exit(FakeApp)
+        self.assertEqual(len(launched), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

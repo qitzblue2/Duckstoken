@@ -713,11 +713,21 @@ class PartialHardwareTests(unittest.TestCase):
 
 
 class AutoFitTests(unittest.TestCase):
-    """Settings the caller left out are fitted to the GPU (loudly); settings the caller passed are never touched."""
+    """Settings the caller left out are fitted to the GPU (loudly); settings the caller passed are never touched.
+
+    The tuner now proposes a placement that already fits, so the planner's safety net is exercised with the tuner's
+    placement switched off (its old "offload everything" default)."""
+
+    def blind_defaults(self):
+        from unittest import mock
+        from duckstoken import tuner
+        real = tuner.recommend
+        return mock.patch.object(tuner, "recommend", lambda hw, model, backend="auto", placement=True: real(hw, model, backend, placement=False))
 
     def test_default_plan_for_a_midrange_gpu_is_loadable_and_says_what_it_changed(self):
         hw = hwmodel.preset_hardware("desktop-32gb-rtx3060")
-        r = planner.plan(hw, GPT120)
+        with self.blind_defaults():
+            r = planner.plan(hw, GPT120)
         self.assertTrue(r["admission"]["can_load"], r["admission"])
         self.assertTrue(any(w.startswith("Not set by you") and "n_cpu_moe" in w for w in r["admission"]["warnings"]))
         self.assertEqual(r["config"]["n_cpu_moe"], planner.min_cpu_moe(hw, GPT120, {k: v for k, v in r["config"].items() if k == "n_gpu_layers"}))
@@ -750,8 +760,9 @@ class AutoFitTests(unittest.TestCase):
         self.assertLessEqual(r["tiers"]["vram"]["planned_gb"]["value"], r["tiers"]["vram"]["budget_gb"]["value"])
 
     def test_missing_n_gpu_layers_is_lowered_when_the_heuristic_overcommits(self):
-        m = dict(DENSE7B, size_bytes=int(1.95 * GIB))  # the tuner's rule keeps all layers for models under the VRAM size
-        r = plan_for("duck-user", m, {"ctx_size": 2048})
+        m = dict(DENSE7B, size_bytes=int(1.95 * GIB))  # the old tuner rule kept all layers for models under the VRAM size
+        with self.blind_defaults():
+            r = plan_for("duck-user", m, {"ctx_size": 2048})
         self.assertEqual([b for b in r["admission"]["blockers"] if "VRAM" in b], [])
         self.assertTrue(any("n_gpu_layers" in w and "Not set by you" in w for w in r["admission"]["warnings"]), r["admission"]["warnings"])
 
@@ -918,3 +929,36 @@ class RealEngineMemoryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhatIfDiskIsAuthoritative(unittest.TestCase):
+    def test_whatif_hdd_is_used_even_when_the_real_model_sits_on_another_drive_letter(self):
+        # review finding: on Windows the real path's drive letter was matched against the mock disk's letter
+        import tempfile
+        from unittest import mock
+        from duckstoken import hardware
+        from duckstoken.vgpu import gptoss, hwmodel, planner
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(hardware, "_IS_WIN", True):
+            path = Path(d) / "m.gguf"
+            path.write_bytes(b"GGUF" + b"\0" * 64)
+            hw = hwmodel.preset_hardware("duck-user-hdd")           # its drive is E:, the real file is elsewhere
+            plan = planner.plan(hw, gptoss.spec_model("gpt-oss-120b"), {"ctx_size": 4096}, None, model_path=str(path))
+        st = plan["tiers"]["storage"]
+        self.assertEqual(st["kind"], "hdd")
+        self.assertEqual(st["drive"], "E:")
+        self.assertEqual(plan["admission"]["verdict"], "reject")      # a hard drive cannot page 20 GB
+
+
+class AutoTuneIsAdmitted(unittest.TestCase):
+    def test_tuner_recommendations_load_on_every_preset_machine(self):
+        # review finding: n_cpu_moe = 36 - int(vram*1.2) put ~2x the VRAM of gpt-oss-120b on the card
+        from duckstoken import tuner
+        from duckstoken.vgpu import gptoss, hwmodel, planner
+        for preset in ("duck-user", "desktop-32gb-rtx3060", "workstation-128gb-rtx4090"):
+            hw = hwmodel.preset_hardware(preset)
+            for name in ("gpt-oss-120b", "gpt-oss-20b"):
+                m = gptoss.spec_model(name)
+                rec = tuner.recommend(hw, m, tuner.resolve_backend(hw, "vulkan"))["values"]
+                plan = planner.plan(hw, m, {k: rec[k] for k in planner.CFG_KEYS if k in rec})
+                self.assertTrue(plan["admission"]["can_load"], (preset, name, plan["admission"]["blockers"]))
+                self.assertFalse(any("VRAM" in b or "GPU" in b for b in plan["admission"]["blockers"]), (preset, name))

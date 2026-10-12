@@ -653,6 +653,19 @@ class TestApplyRevert(OptCase):
         self.assertIsNone(prof["previous"])
         self.assertFalse(O.revert_profile(self.store, self.key, self.updater)["reverted"])     # nothing left to revert
 
+    def test_rerunning_the_optimizer_after_apply_keeps_undo_working(self):
+        # review finding: a second run replaced the stored profile and erased the saved previous values
+        original = dict(self.current)
+        O.apply_best(self.store, self.key, self.updater, current=dict(self.current))
+        again = self.run_opt(Script(lambda s, p, n, c: make_rec(gen=7.0 + (s.get("n_gpu_layers") or 0), ngl=s.get("n_gpu_layers") or 0)))
+        self.assertEqual(again["best"]["profile_key"], self.key)
+        prof = self.store.get_profile(self.key)
+        self.assertTrue(prof["applied"])
+        self.assertEqual(prof["previous"]["n_gpu_layers"], original["n_gpu_layers"])
+        res = O.revert_profile(self.store, self.key, self.updater)
+        self.assertTrue(res["reverted"], res)
+        self.assertEqual(self.current["n_gpu_layers"], original["n_gpu_layers"])
+
     def test_applying_twice_keeps_the_original_previous_values(self):
         original = dict(self.current)
         O.apply_best(self.store, self.key, self.updater, current=dict(self.current))

@@ -324,6 +324,35 @@ class AdmissionGate(VGpuApiBase):
         self.assertNotIn("_status", r)
         self.call("server/stop", {})
 
+    @POSIX
+    def test_gpu_offload_bigger_than_vram_is_fitted_for_that_start_only(self):
+        # review finding: the shipped "gpt-oss-120b, small GPU" preset (99 GPU layers) was refused on a 2 GB GTX 750
+        from unittest import mock
+        from duckstoken import hardware
+        from duckstoken.vgpu import hwmodel
+        kv = {"general.architecture": "gpt-oss", "general.name": "gpt-oss-120b", "gpt-oss.block_count": 36, "gpt-oss.expert_count": 128,
+              "gpt-oss.expert_used_count": 4, "gpt-oss.embedding_length": 2880, "gpt-oss.attention.head_count": 64,
+              "gpt-oss.attention.head_count_kv": 8, "gpt-oss.context_length": 131072, "gpt-oss.expert_feed_forward_length": 2880,
+              "gpt-oss.attention.sliding_window": 128, "general.file_type": 38}
+        big = vgpu_kit.make_model(self.tmp.name, "gpt-oss-120b-MXFP4.gguf", kv)
+        with open(big, "r+b") as f:
+            f.truncate(int(63.4e9))
+        s = vgpu_kit.fake_settings(self.tmp.name)
+        appmod.APP.settings.update({"llama_server_path": s["llama_server_path"], "model_path": big, "n_gpu_layers": 99, "n_cpu_moe": 36,
+                                    "ctx_size": 4096, "port": ti.free_port()})
+        with mock.patch.object(hardware, "get_hardware", return_value=hwmodel.preset_hardware("duck-user")):
+            plan = appmod.APP.vgpu.admit(appmod.APP.settings.all())
+            self.assertTrue(plan["admission"]["can_load"], plan["admission"])
+            fit = plan["autofit"]
+            self.assertLess(fit["overrides"]["n_gpu_layers"], 99)
+            self.assertEqual(fit["was"]["n_gpu_layers"], 99)
+            # the explicit "do not touch my settings" switches
+            appmod.APP.settings.update({"vgpu_autofit": False})
+            with self.assertRaises(appmod.ApiError) as cm:
+                appmod.APP.vgpu.admit(appmod.APP.settings.all())
+            self.assertEqual(cm.exception.status, 409)
+        self.assertEqual(appmod.APP.settings.get("n_gpu_layers"), 99)  # the saved settings were never changed
+
     def test_gate_can_be_turned_off_and_small_models_pass(self):
         s = vgpu_kit.fake_settings(self.tmp.name)
         appmod.APP.settings.update({"llama_server_path": s["llama_server_path"], "model_path": self.model, "port": ti.free_port()})

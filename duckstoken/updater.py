@@ -611,6 +611,11 @@ class UpdateChecker:
             return {"checking": self._checking, "result": result, "last_checked": float(entry.get("checked", 0)),
                     "last_error": self.last_error, "downloaded": downloaded}
 
+    def mark_applied(self) -> None:
+        """The downloaded file has been handed to the installer/helper: never offer or launch it again."""
+        with self._lock:
+            self._downloaded = None
+
     def download_update(self, progress: Callable[[int, int], None] = lambda done, total: None, cancel=None) -> Path:
         """Download the update found by the last check into `<data_dir>/updates` and remember it for `status()`."""
         result = self.status()["result"]
