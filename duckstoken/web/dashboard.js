@@ -145,6 +145,12 @@ const Dashboard = {
         h('span', {}, 'RAM ', VU.fmt(s.ram && s.ram.used_pct, '%', 0)), h('span', {}, 'CPU ', VU.fmt(s.cpu && s.cpu.util_pct, '%', 0)),
         gpu ? h('span', {}, 'GPU ', VU.fmt(gpu.util_pct, '%', 0), ' · VRAM ', VU.fmt(gpu.vram_used_mb, 'MB', 0)) : h('span', { class: 'unavail' }, 'GPU telemetry unavailable'),
         proc.rss_gb && proc.rss_gb.value != null ? h('span', {}, 'model ', VU.fmt(proc.rss_gb, 'GB')) : null);
+      const lr = t.last_request;
+      if (lr) box.append(h('span', { title: 'Measured from your latest chat reply (' + (lr.gen_tps && lr.gen_tps.source) + ')' }, 'last reply: first token ', VU.fmt(lr.ttft_s, 's', 2),
+        ' · read prompt ', VU.fmt(lr.prompt_tps, 't/s', 0), ' · generate ', VU.fmt(lr.gen_tps, 't/s', 1)));
+      if (t.prewarm && t.prewarm.state === 'running') box.append(h('span', { class: 'badge loading' }, '🔥 ' + (t.prewarm.message || 'reading the model into the file cache…')));
+      const wd = t.watchdog && t.watchdog.events && t.watchdog.events.slice(-1)[0];
+      if (wd && Date.now() / 1000 - wd.t < 600) box.append(h('span', { class: 'badge error', title: wd.crash.why }, 'server ' + (wd.action === 'restarted' ? 'crashed and was restarted' : 'crashed')));
     } catch (e) { clear(this.refs.live); }
   },
   async pullLogs() {

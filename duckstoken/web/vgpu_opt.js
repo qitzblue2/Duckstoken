@@ -70,7 +70,7 @@ const VOptimizer = {
         box.append(h('div', { class: 'note ' + (st === 'fresh' ? 'good' : 'warn') },
           st === 'fresh' ? '✅ Saved settings match this PC, model and engine. ' : '⚠ The hardware, model or engine changed since the last optimization — re-run it. ',
           p.objective ? `Goal: ${OBJECTIVES[p.objective] ? OBJECTIVES[p.objective][0] : p.objective}. ` : '',
-          p.measured && p.measured.gen_tps ? `Measured ${Number(p.measured.gen_tps).toFixed(2)} tokens/s. ` : '',
+          p.measured && VU.n(p.measured.gen_tps) != null ? `Measured ${Number(VU.n(p.measured.gen_tps)).toFixed(2)} tokens/s. ` : '',
           h('button', { style: 'margin-left:8px', onclick: () => this.apply(d.key) }, 'Apply to settings'),
           p.previous ? h('button', { style: 'margin-left:6px', onclick: () => this.revert(d.key) }, 'Undo last apply') : null));
       }
@@ -92,7 +92,7 @@ const VOptimizer = {
           h('td', { class: 'mono small' }, Object.entries(c.overrides || {}).map(([k, v]) => `${k}=${v}`).join(' ') || 'current settings'),
           h('td', {}, c.admitted ? VU.statusChip(c.verdict === 'ok' ? 'ok' : 'warn') : VU.statusChip('fail'), ' ',
             h('span', { class: 'small' }, c.admitted ? (c.verdict || '') : (c.reject_reason || 'rejected — will not be run'))),
-          h('td', {}, c.tokens_per_s ? VU.range(c.tokens_per_s, 't/s') : '—'))))));
+          h('td', {}, VU.range(c.tokens_per_s, 't/s')))))));
       box.append(h('div', { class: 'muted small' }, 'Rejected candidates are never started, so they cannot run you out of memory.'));
     } catch (e) { clear(box).append(h('div', { class: 'note bad' }, e.message)); }
   },
@@ -140,29 +140,38 @@ const VOptimizer = {
     if (kind === 'benchmark') { box.append(h('div', { class: 'card' }, h('h2', {}, 'Benchmark result'), this.benchDetail(res))); return; }
     const best = res.best;
     const card = h('div', { class: 'card' }, h('h2', {}, '🏁 Optimizer result'));
-    if (res.estimate_only) card.append(h('div', { class: 'note' }, 'Estimate only: nothing was run, so every number below is an estimate.'));
+    if (res.estimate_only || res.status === 'estimate_only') card.append(h('div', { class: 'note' }, 'Estimate only: nothing was run, so every number below is an estimate and cannot be applied.'));
+    if (res.status === 'aborted') card.append(h('div', { class: 'note bad' }, 'Stopped early because memory pressure became critical. ' + (res.error || '')));
     if (best) {
-      card.append(h('div', { class: 'verdict ok' }, '🏆 Best for “' + ((OBJECTIVES[res.objective] || [res.objective])[0]) + '”: ' + (best.label || best.id),
-        best.score != null ? h('span', { class: 'muted small' }, ' score ' + Number(best.score).toFixed(3)) : null),
-        h('div', { class: 'mono small' }, Object.entries(best.patch || {}).map(([k, v]) => `${k}=${v}`).join('  ') || 'no changes needed — your current settings are already the best tested'),
+      card.append(h('div', { class: 'verdict ok' }, '🏆 Best for “' + ((OBJECTIVES[res.objective] || [res.objective])[0]) + '”: ' + (best.label || best.candidate_id),
+        VU.n(best.score) != null ? h('span', { class: 'muted small', title: (best.score && best.score.note) || '' }, ' score ' + Number(VU.n(best.score)).toFixed(3)) : null,
+        h('span', { class: 'vchip ' + (best.basis === 'measured' ? 'measured' : 'estimated') }, best.basis)),
+        h('div', { class: 'small' }, best.reason || ''),
+        best.vs_baseline ? h('div', { class: 'note ' + (best.vs_baseline.distinguishable ? 'good' : 'warn') }, best.vs_baseline.note || '') : null,
+        h('div', { class: 'mono small' }, Object.entries(best.patch || {}).filter(([k]) => k !== 'model_path').map(([k, v]) => `${k}=${v}`).join('  ') || 'no changes needed — your current settings are already the best tested'),
         h('div', { class: 'row', style: 'margin:8px 0' },
-          res.profile_key ? h('button', { class: 'primary', onclick: () => this.apply(res.profile_key) }, 'Apply these settings') : null,
+          best.basis === 'measured' && best.profile_key ? h('button', { class: 'primary', onclick: () => this.apply(best.profile_key) }, 'Apply these settings') : null,
           h('span', { class: 'muted small' }, 'Your settings stay unchanged until you press this.')));
     } else {
-      card.append(h('div', { class: 'note bad' }, res.reason || 'No configuration could be measured. Your settings were not changed.'));
+      card.append(h('div', { class: 'note bad' }, res.error || (res.notes || []).join(' ') || 'No configuration could be measured. Your settings were not changed.'));
     }
-    const rows = res.comparison || [];
-    if (rows.length) {
-      card.append(h('h3', {}, 'Measured vs estimated'), h('table', { class: 'compact' },
-        h('thead', {}, h('tr', {}, ['Configuration', 'Status', 'Estimated t/s', 'Measured t/s (generation)', 'Prompt t/s', 'Δ vs estimate'].map((t) => h('th', {}, t)))),
-        h('tbody', {}, rows.map((c) => h('tr', { class: best && c.candidate === best.id ? 'best' : '' },
-          h('td', {}, c.label || c.candidate), h('td', {}, VU.statusChip(c.status === 'ok' ? 'ok' : c.status === 'rejected' ? 'fail' : 'warn'), ' ', h('span', { class: 'small muted' }, c.status === 'ok' ? '' : (c.reason || c.status))),
-          h('td', { class: 'num' }, c.estimated_tps != null ? Number(VU.n(c.estimated_tps)).toFixed(2) : '—'),
-          h('td', { class: 'num' }, c.measured_gen_tps != null ? Number(VU.n(c.measured_gen_tps)).toFixed(2) : h('span', { class: 'unavail' }, 'not measured')),
-          h('td', { class: 'num' }, c.measured_prompt_tps != null ? Number(VU.n(c.measured_prompt_tps)).toFixed(1) : '—'),
-          h('td', { class: 'num' }, c.delta != null ? (c.delta > 0 ? '+' : '') + Number(c.delta).toFixed(2) : '—'))))));
-    }
-    if ((res.reverted || []).length) card.append(h('h3', {}, 'Reverted (never applied)'), res.reverted.map((x) => h('div', { class: 'note warn' }, `${x.label || x.id}: ${x.reason || x.status}`)));
+    (res.models || []).forEach((m) => {
+      card.append(h('h3', {}, m.name + (m.size_gb ? ` (${fmtGB(m.size_gb)})` : '')), m.error ? h('div', { class: 'note bad' }, m.error) : null,
+        h('table', { class: 'compact' },
+          h('thead', {}, h('tr', {}, ['Configuration', 'Status', 'Estimated t/s', 'Measured generation t/s', 'Measured prompt t/s', 'Δ vs estimate', 'vs baseline'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, (m.candidates || []).map((c) => h('tr', { class: c.id === m.best_id ? 'best' : '' },
+            h('td', {}, c.label, c.id === m.best_id ? ' 🏆' : '', h('div', { class: 'mono small muted' }, Object.entries(c.overrides || {}).map(([k, v]) => `${k}=${v}`).join(' '))),
+            h('td', {}, VU.statusChip(c.status === 'ok' || c.status === 'estimated' ? 'ok' : c.status === 'rejected' || c.status === 'skipped' ? 'warn' : 'fail'), ' ', h('span', { class: 'small muted' }, c.status === 'ok' ? '' : (c.reason || c.reject_reason || c.status))),
+            h('td', { class: 'num' }, VU.fmt(c.estimated_tps, '', 2)),
+            h('td', { class: 'num' }, VU.n(c.measured_gen_tps) != null ? VU.fmt(c.measured_gen_tps, '', 2) : h('span', { class: 'unavail' }, 'not measured')),
+            h('td', { class: 'num' }, VU.n(c.measured_prompt_tps) != null ? VU.fmt(c.measured_prompt_tps, '', 1) : '—'),
+            h('td', { class: 'num' }, VU.n(c.delta) != null ? ((VU.n(c.delta) > 0 ? '+' : '') + Number(VU.n(c.delta)).toFixed(2)) : '—'),
+            h('td', { class: 'num' }, c.speedup_vs_baseline != null ? '×' + c.speedup_vs_baseline : '—'))))));
+      if ((m.quant_alternatives || []).length) card.append(h('details', {}, h('summary', { class: 'muted small' }, 'Other quantizations of this model (estimates only, never benchmarked)'),
+        h('table', { class: 'compact' }, h('tbody', {}, m.quant_alternatives.map((q) => h('tr', {}, h('td', {}, q.quant), h('td', { class: 'num' }, VU.gb(q.file_gb)), h('td', {}, q.verdict || '')))))));
+    });
+    if ((res.reverted || []).length) card.append(h('h3', {}, 'Reverted — never applied'), res.reverted.map((x) => h('div', { class: 'note warn' }, `${x.candidate || x.id}: ${x.reason || x.status}`)));
+    if ((res.notes || []).length) card.append(res.notes.map((n) => h('div', { class: 'muted small' }, n)));
     box.append(card);
   },
   benchDetail(b) {
@@ -171,7 +180,7 @@ const VOptimizer = {
     const f = (v, d = 2) => (v == null ? h('span', { class: 'unavail' }, 'n/a') : Number(VU.n(v)).toFixed(d));
     const m = b.metrics || {};
     return h('div', {},
-      h('div', { class: 'row' }, VU.statusChip(b.status === 'ok' ? 'ok' : 'fail'), h('b', {}, (b.model && b.model.name) || ''), h('span', { class: 'muted small' }, new Date((b.created || 0) * 1000).toLocaleString())),
+      h('div', { class: 'row' }, VU.statusChip(b.status === 'ok' ? 'ok' : 'fail'), h('b', {}, (b.model && b.model.name) || ''), h('span', { class: 'muted small' }, VU.when(b.created))),
       b.error ? h('div', { class: 'note bad' }, b.error) : null, VU.list(b.reasons, 'warn'),
       h('table', { class: 'compact' }, h('thead', {}, h('tr', {}, ['', 'Prompt processing (t/s)', 'Generation (t/s)', 'Time to first token (s)'].map((t) => h('th', {}, t)))),
         h('tbody', {},
@@ -206,14 +215,15 @@ const VOptimizer = {
       else bx.append(h('table', { class: 'compact' }, h('thead', {}, h('tr', {}, ['When', 'Model', 'Label', 'Status', 'Gen t/s', 'Prompt t/s', ''].map((t) => h('th', {}, t)))),
         h('tbody', {}, b.benchmarks.map((x) => {
           const w = x.warm || {};
-          return h('tr', {}, h('td', { class: 'small' }, new Date((x.created || 0) * 1000).toLocaleString()), h('td', {}, (x.model && x.model.name) || ''), h('td', { class: 'small' }, x.label || ''),
+          return h('tr', {}, h('td', { class: 'small' }, VU.when(x.created)), h('td', {}, (x.model && x.model.name) || ''), h('td', { class: 'small' }, x.label || ''),
             h('td', {}, VU.statusChip(x.status === 'ok' ? 'ok' : x.status === 'rejected' ? 'warn' : 'fail')),
             h('td', { class: 'num' }, w.gen_tps && w.gen_tps.mean != null ? Number(VU.n(w.gen_tps.mean)).toFixed(2) : '—'), h('td', { class: 'num' }, w.prompt_tps && w.prompt_tps.mean != null ? Number(VU.n(w.prompt_tps.mean)).toFixed(1) : '—'),
             h('td', {}, h('button', { onclick: () => this.showBench(x.id) }, 'Details'), ' ', h('button', { onclick: async () => { if (await confirmBox('Delete this benchmark record?', 'Only the saved result is removed.')) { await api('vgpu/bench/delete', { id: x.id, confirm: true }).catch(fail); this.loadHistory(); } } }, '✕')));
         }))));
-      if (o.history.length) hx.append(h('h3', {}, 'Optimizer runs'), h('table', { class: 'compact' }, h('thead', {}, h('tr', {}, ['When', 'Goal', 'Model', 'Winner', 'Measured t/s'].map((t) => h('th', {}, t)))),
-        h('tbody', {}, o.history.map((x) => h('tr', {}, h('td', { class: 'small' }, new Date((x.created || 0) * 1000).toLocaleString()), h('td', {}, (OBJECTIVES[x.objective] || [x.objective])[0]), h('td', {}, x.model || ''),
-          h('td', {}, x.best ? (x.best.label || x.best.id) : h('span', { class: 'unavail' }, 'none')), h('td', { class: 'num' }, x.best && x.best.gen_tps != null ? Number(VU.n(x.best.gen_tps)).toFixed(2) : '—'))))));
+      if (o.history.length) hx.append(h('h3', {}, 'Optimizer runs'), h('table', { class: 'compact' }, h('thead', {}, h('tr', {}, ['When', 'Goal', 'Models', 'Result', 'Winner'].map((t) => h('th', {}, t)))),
+        h('tbody', {}, o.history.map((x) => h('tr', {}, h('td', { class: 'small' }, VU.when(x.created)), h('td', {}, (OBJECTIVES[x.objective] || [x.objective])[0]), h('td', { class: 'small' }, (x.models || []).join(', ')),
+          h('td', {}, VU.statusChip(x.status === 'ok' ? 'ok' : x.estimate_only ? 'warn' : 'fail'), ' ', h('span', { class: 'small muted' }, x.estimate_only ? 'estimate' : x.status)),
+          h('td', {}, x.best ? (x.best.label || x.best.candidate_id) : h('span', { class: 'unavail' }, 'none'), x.best ? h('span', { class: 'vchip ' + (x.best.basis === 'measured' ? 'measured' : 'estimated') }, x.best.basis) : null))))));
     } catch (e) { bx.append(h('div', { class: 'note bad' }, e.message)); }
   },
   async showBench(id) {

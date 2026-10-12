@@ -26,9 +26,11 @@ const VU = {
   },
   gb: (v, d = 1) => VU.fmt(v, 'GB', d),
   range(r, unit) {
-    const a = r && VU.n(r[0]); const b = r && VU.n(r[1]);
-    return a == null ? h('span', { class: 'unavail' }, 'Unavailable') : h('span', {}, `${a}–${b} ${unit}`, VU.chip(r[0] && VU.isV(r[0]) ? r[0] : { status: 'estimated' }));
+    const v = Array.isArray(r) ? [VU.n(r[0]), VU.n(r[1])] : (VU.isV(r) && Array.isArray(r.value) ? r.value : null);
+    if (!v || v[0] == null) return h('span', { class: 'unavail', title: (r && r.note) || '' }, 'Unavailable');
+    return h('span', {}, `${v[0]}–${v[1]} ${unit}`, VU.chip(VU.isV(r) ? r : { status: 'estimated' }));
   },
+  when(c) { const d = typeof c === 'number' ? new Date(c * 1000) : new Date(c); return isNaN(d) ? '' : d.toLocaleString(); },
   statusChip: (s) => h('span', { class: 'statuschip ' + s }, s),
   stat(label, content, sub) {
     return h('div', { class: 'vstat' }, h('div', { class: 'lab' }, label), h('div', { class: 'big' }, content), sub ? h('div', { class: 'lab' }, sub) : null);
@@ -77,6 +79,7 @@ const VMemory = {
     r.model = h('select', { onchange: () => this.runPlan() });
     r.ctx = h('input', { type: 'number', min: 256, step: 256, style: 'width:110px', onchange: () => this.runPlan() });
     r.preset = h('select', { onchange: () => this.runPlan() }, h('option', { value: '' }, 'This PC (detected)'));
+    r.strict = h('input', { type: 'checkbox', onchange: () => this.runPlan() });
     r.planOut = h('div', {}, h('div', { class: 'muted' }, 'Pick a model to see where its weights, KV cache and buffers would live.'));
     r.sparks = h('div', { class: 'sparks' });
     r.cache = h('div');
@@ -89,7 +92,9 @@ const VMemory = {
         h('div', { class: 'row' }, h('div', { class: 'grow' }, r.model), h('label', { class: 'small muted' }, 'Context ', r.ctx),
           h('label', { class: 'small muted', style: 'min-width:240px' }, 'Hardware ', r.preset),
           h('button', { class: 'primary', onclick: () => this.runPlan() }, 'Check')),
+        h('label', { class: 'small muted' }, r.strict, ' Use my current settings exactly (otherwise unset GPU/MoE knobs are auto-fitted to this hardware)'),
         r.planOut),
+      h('div', { class: 'card' }, h('h2', {}, '📦 Quantization options for this model'), r.quants = h('div', { class: 'muted' }, 'Choose a model to compare quantizations.')),
       h('div', { class: 'card' }, h('h2', {}, '💾 Storage tiers: prewarm & staging cache'), r.cache),
       h('div', { class: 'card' }, h('h2', {}, '⚙ Active strategy & what the engine can expose'), r.caps));
   },
@@ -193,8 +198,8 @@ const VMemory = {
     if (!path) { this.plan = null; return; }
     clear(r.planOut).append(h('span', { class: 'muted' }, 'Planning…'));
     try {
-      const d = await api('vgpu/plan', { model_path: path, ctx_size: parseInt(r.ctx.value, 10) || undefined, preset: r.preset.value || undefined });
-      this.plan = d.plan; this.renderPlan(d);
+      const d = await api('vgpu/plan', { model_path: path, ctx_size: parseInt(r.ctx.value, 10) || undefined, preset: r.preset.value || undefined, use_settings: r.strict.checked });
+      this.plan = d.plan; this.renderPlan(d); this.loadQuants(path);
       this.poll();
     } catch (e) { clear(r.planOut).append(h('div', { class: 'note bad' }, e.message)); }
   },
@@ -227,6 +232,19 @@ const VMemory = {
     if (!a.can_load) out.append(h('div', { class: 'muted small' }, 'You can still try: Dashboard → Start asks for confirmation and loads it anyway.'));
   },
 
+  async loadQuants(path) {
+    const box = clear(this.refs.quants);
+    try {
+      const d = await api('vgpu/quants?model_path=' + encodeURIComponent(path));
+      box.append(h('div', { class: 'muted small' }, `This file is ${d.current || 'an unknown quantization'}. File sizes are estimates from bits per weight; quality notes are qualitative, not scores.`),
+        h('table', { class: 'compact' }, h('thead', {}, h('tr', {}, ['Quantization', 'Bits/weight', 'File', 'RAM needed', 'Fits here?', 'Quality trade-off', 'How to get it'].map((t) => h('th', {}, t)))),
+          h('tbody', {}, d.rows.map((x) => h('tr', { class: x.quant === d.current ? 'best' : '' },
+            h('td', {}, h('b', {}, x.quant)), h('td', { class: 'num' }, Number(x.bits_per_weight).toFixed(2)), h('td', { class: 'num' }, VU.gb(x.file_gb)), h('td', { class: 'num' }, VU.gb(x.ram_gb)),
+            h('td', {}, VU.statusChip(x.verdict === 'ok' ? 'ok' : x.verdict === 'reject' ? 'fail' : 'warn'), ' ', h('span', { class: 'small muted' }, x.verdict)),
+            h('td', { class: 'small' }, x.quality_note), h('td', { class: 'small muted' }, x.conversion_required ? 'needs conversion' : (x.how_to_get || 'GGUF, loads directly')))))));
+    } catch (e) { box.append(h('span', { class: 'muted small' }, e.message)); }
+  },
+
   async loadCaps() {
     try {
       const d = await api('vgpu/capabilities'), box = clear(this.refs.caps);
@@ -240,7 +258,7 @@ const VMemory = {
   async loadCache() {
     const box = clear(this.refs.cache);
     try {
-      const d = await api('vgpu/cache');
+      const d = await api('vgpu/cache' + (this.refs.model.value ? '?model_path=' + encodeURIComponent(this.refs.model.value) : ''));
       const pw = d.prewarm || {};
       box.append(h('div', { class: 'muted small' }, 'Prewarm reads the model once, in order, into the OS file cache. That turns many slow random page faults into one fast sequential pass — it only helps if the model fits in free RAM, and it does not make a hard drive fast.'),
         h('div', { class: 'row', style: 'margin:8px 0' },
@@ -251,32 +269,32 @@ const VMemory = {
       if (!sg.enabled) {
         box.append(h('div', { class: 'note' }, 'Staging cache is off. To use a fast drive as a cache tier, set a folder and a size limit in Settings → Virtual GPU & memory manager.'));
       } else {
-        box.append(h('div', { class: 'kv' }, h('div', {}, 'Folder'), h('div', { class: 'mono' }, sg.dir), h('div', {}, 'Used'), h('div', {}, `${Number(sg.usage.used_gb || 0).toFixed(1)} of ${Number(sg.budget_gb).toFixed(0)} GB`)));
+        const used = (sg.usage.used_bytes || 0) / 2 ** 30;
+        box.append(h('div', { class: 'kv' }, h('div', {}, 'Folder'), h('div', { class: 'mono' }, sg.dir), h('div', {}, 'Used'), h('div', {}, `${used.toFixed(1)} of ${Number(sg.budget_gb || 0).toFixed(0)} GB`)));
         if (d.stage_plan) {
           const sp = d.stage_plan;
           box.append(h('div', { class: 'note ' + (sp.worthwhile ? 'good' : '') }, sp.reason || (sp.worthwhile ? 'Copying this model to the fast drive would speed up paging.' : 'Not needed.')),
-            sp.worthwhile ? h('button', { class: 'primary', onclick: () => this.stage(sp) }, `Copy to cache (${fmtGB(sp.size_gb)})…`) : null);
+            sp.worthwhile ? h('button', { class: 'primary', onclick: () => this.stage(sp, sg.dir) }, `Copy to cache (${fmtGB(sp.size_gb)})…`) : null);
         }
-        (sg.items || []).forEach((it) => box.append(h('div', { class: 'row small' }, h('span', { class: 'grow mono' }, it.name), h('span', { class: 'muted' }, fmtGB(it.size_gb)),
+        (sg.items || []).forEach((it) => box.append(h('div', { class: 'row small' }, h('span', { class: 'grow mono' }, it.name), h('span', { class: 'muted' }, fmtBytes(it.size)),
           h('button', { onclick: async () => { if (await confirmBox('Remove the staged copy?', 'Only the cached copy is deleted; the original model stays where it is.')) { await api('vgpu/cache/evict', { name: it.name, confirm: true }).catch(fail); this.loadCache(); } } }, 'Remove copy'))));
       }
-      const b = d.bounded || {};
-      Object.entries(b).forEach(([k, v]) => box.append(h('div', { class: 'muted small' }, `Cache “${k}”: ${v.hits} hits · ${v.misses} misses · ${v.evictions} evictions (${v.items} items)`)));
+      Object.entries(d.bounded || {}).forEach(([k, v]) => box.append(h('div', { class: 'muted small' }, `Cache “${k}”: ${v.hits} hits · ${v.misses} misses · ${v.evictions} evictions · ${v.items} items (${v.hit_rate == null ? 'no lookups yet' : Math.round(v.hit_rate * 100) + '% hit rate'})`)));
     } catch (e) { box.append(h('div', { class: 'note bad' }, e.message)); }
   },
   async prewarm() {
     const path = this.refs.model.value || S.values.model_path;
     if (!path) { toast('Choose a model first', 'err'); return; }
-    try { await api('vgpu/prewarm/start', { path }); toast('Prewarming…', 'ok'); this.watchPrewarm(); } catch (e) { fail(e); }
+    try { await api('vgpu/prewarm/start', { model_path: path }); toast('Prewarming…', 'ok'); this.watchPrewarm(); } catch (e) { fail(e); }
   },
   async watchPrewarm() {
     const d = await api('vgpu/cache').catch(() => null);
     if (d) { this.loadCache(); if (d.prewarm && d.prewarm.state === 'running') setTimeout(() => this.watchPrewarm(), 1500); }
   },
-  async stage(sp) {
-    const ok = await confirmBox('Copy the model to the fast drive?', `This writes ${fmtGB(sp.size_gb)} to ${sp.dest || 'the cache folder'}. The original is not touched, and the copy is removed automatically if the cache needs room.`);
+  async stage(sp, dir) {
+    const ok = await confirmBox('Copy the model to the fast drive?', `This writes ${fmtGB(sp.size_gb)} to ${dir || 'the cache folder'}. The original is not touched, and the copy is removed automatically if the cache needs room.`);
     if (!ok) return;
-    try { await api('vgpu/cache/stage', { path: this.refs.model.value || S.values.model_path, confirm: true }); toast('Copying in the background', 'ok'); this.watchPrewarm(); } catch (e) { fail(e); }
+    try { await api('vgpu/cache/stage', { model_path: this.refs.model.value || S.values.model_path, confirm: true }); toast('Copying in the background — progress shows on the Optimizer tab’s job card', 'ok'); } catch (e) { fail(e); }
   },
 };
 
