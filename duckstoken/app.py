@@ -18,8 +18,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import __version__, api_learning, bundle, context, downloads, gguf, hardware, paths, settings as st, tuner, websearch
+from . import __version__, api_learning, api_system, bundle, context, downloads, gguf, hardware, paths, settings as st, tuner, updater, websearch
 from .api_learning import LearningApi, post
+from .api_system import SystemApi, UpdateJob
 from .dataset import DatasetStore
 from .db import Database
 from .engines import ENGINE_LABELS, EngineSwitch, load_engines
@@ -29,6 +30,7 @@ from .feedback import ExchangeStore
 from .memory import MemoryStore
 from .server_proc import ServerManager
 from .tools import TOOLS, ToolRunner
+from .vgpu.meter import RequestMeter
 
 WEB = Path(__file__).parent / "web"
 HF_QUICK = [
@@ -52,7 +54,12 @@ class App:
         self.dataset = DatasetStore(self.db, self.exchanges)
         self.worker = EscalationWorker(self.db, self.settings.all, self.server, self.big, self.exchanges, self.queue)
         self.tools = ToolRunner(self.settings.all, memory=self.memory, web=websearch)
+        self.updater = updater.UpdateChecker(self.settings.all, paths.data_dir())
+        self.update_job = UpdateJob()
+        self.last_request: dict = {}  # speed of the latest chat reply (measured), shown on the Dashboard
+        self.vgpu = None  # set by vgpu_bind() once the memory manager is created
         api_learning.bind(self)
+        api_system.bind(self)
         self.token = secrets.token_urlsafe(24)
         self.httpd: ThreadingHTTPServer | None = None
         self._gguf_cache: dict = {}
@@ -116,6 +123,18 @@ class App:
         p["_duck_context"] = info
         return p
 
+    def note_request(self, meter: RequestMeter) -> None:
+        """Remember how fast the latest reply was (measured from the real stream) and log it."""
+        try:
+            r = meter.result(self.settings.get("engine"))
+            if r["ttft_s"]["value"] is None:
+                return
+            self.last_request = r
+            if self.vgpu is not None and self.settings.get("vgpu_perf_log"):
+                self.vgpu.perflog.log("chat_request", **{k: (v["value"] if isinstance(v, dict) else v) for k, v in r.items()})
+        except Exception:  # noqa: BLE001 - metering must never break a chat
+            pass
+
     def disk_benchmark(self, path: str, mb: int = 256) -> dict:
         d = Path(path)
         if not d.is_dir():
@@ -149,6 +168,7 @@ class App:
 
     def shutdown(self) -> None:
         self.worker.stop()
+        api_system.apply_on_exit(self)
         if self.settings.get("stop_server_on_exit"):
             self.server.stop()
             self.big.stop()
@@ -188,7 +208,7 @@ def _browse(path: str, want_files: bool, ext: str) -> dict:
 
 
 # ============================================================ HTTP handler
-class Handler(LearningApi, BaseHTTPRequestHandler):
+class Handler(SystemApi, LearningApi, BaseHTTPRequestHandler):
     server_version = "Duckstoken/" + __version__
     protocol_version = "HTTP/1.0"
 
@@ -302,6 +322,11 @@ class Handler(LearningApi, BaseHTTPRequestHandler):
         if wanted and wanted != APP.settings.get("engine"):
             APP.server.stop()  # never leave the previous engine running unseen
         applied = APP.apply_patch(b.get("values") or {})
+        if "launch_at_startup" in applied:
+            from . import shell
+            if not shell.set_autostart(bool(applied["launch_at_startup"])) and applied["launch_at_startup"] and os.name == "nt":
+                APP.settings.update({"launch_at_startup": False})
+                raise ApiError("Windows would not let Duckstoken add itself to the startup list.")
         return {"applied": applied, "values": APP.settings.all()}
 
     def api_settings_reset(self, q, b):
@@ -515,6 +540,7 @@ class Handler(LearningApi, BaseHTTPRequestHandler):
         duck_context = payload.pop("_duck_context", {})
         req = urllib.request.Request(APP.server.base_url() + "/v1/chat/completions",
                                      data=json.dumps(payload).encode(), headers=APP.server.upstream_headers())
+        meter = RequestMeter()
         try:
             up = urllib.request.urlopen(req, timeout=APP.settings.get("server_timeout"))
         except urllib.error.HTTPError as e:
@@ -524,7 +550,10 @@ class Handler(LearningApi, BaseHTTPRequestHandler):
             raise ApiError(f"Cannot reach the model engine: {e}", 502) from e
         with up:
             if not payload["stream"]:
-                self._send(200, up.read())
+                body = up.read()
+                meter.feed_body(body)
+                APP.note_request(meter)
+                self._send(200, body)
                 return None
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -537,10 +566,13 @@ class Handler(LearningApi, BaseHTTPRequestHandler):
                     line = up.readline()
                     if not line:
                         break
+                    meter.feed(line)
                     self.wfile.write(line)
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass  # browser pressed Stop -> closing `up` makes llama-server abort the generation
+            finally:
+                APP.note_request(meter)
         return None
 
 
@@ -597,6 +629,7 @@ def run(open_browser: bool | None = None, port: int | None = None, headless: boo
     serving.start()
     threading.Thread(target=hardware.get_hardware, daemon=True).start()  # warm the slow probes
     APP.worker.start()
+    threading.Thread(target=api_system.background_update_check, args=(APP,), daemon=True, name="update-check").start()
     if APP.settings.get("autostart_server"):
         try:
             APP.server.start(APP.settings.all())

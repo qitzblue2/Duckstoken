@@ -11,7 +11,7 @@ async function api(path, body, opts = {}) {
   if (opts.raw) return r;
   let data = {};
   try { data = await r.json(); } catch (e) { /* not json */ }
-  if (!r.ok) throw new Error(data.error || ('HTTP ' + r.status));
+  if (!r.ok) { const err = new Error(data.error || ('HTTP ' + r.status)); err.data = data; err.status = r.status; throw err; }
   return data;
 }
 

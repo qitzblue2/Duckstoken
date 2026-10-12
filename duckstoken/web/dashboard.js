@@ -47,6 +47,7 @@ const Dashboard = {
             h('div', { class: 'row', style: 'margin:10px 0' }, r.start, r.stop, r.restart,
               h('button', { onclick: () => this.autotune() }, '⚡ Auto-tune for my PC'), r.info),
             r.err,
+            r.live = h('div', { class: 'vrow small', style: 'margin:6px 0' }),
             h('details', {}, h('summary', { class: 'muted small' }, 'Command line'), r.cmd),
             h('div', { style: 'height:8px' }), r.log),
           h('div', { class: 'card' }, h('h2', {}, '⬇ Downloads & installs'), r.jobs)),
@@ -117,13 +118,34 @@ const Dashboard = {
       window.Settings && Settings.refresh();
     } catch (e) { fail(e); }
   },
-  async control(action) {
+  async control(action, force) {
     try {
       this.refs.err.replaceChildren();
-      const r = await api('server/' + action, {});
+      const r = await api('server/' + action, force ? { force: true } : {});
       S.runningSnapshot = { ...S.values }; S.dirty.clear(); updateDirtyBanner();
       toast(action === 'stop' ? 'Stopped' : 'Starting… large models can take minutes to load', 'ok');
-    } catch (e) { fail(e); }
+    } catch (e) {
+      const adm = e.data && e.data.admission;
+      if (adm) {
+        const body = h('div', {}, h('p', {}, e.message), VU.list(adm.blockers, 'bad'), VU.list(adm.warnings, 'warn'), VU.list(adm.suggestions, ''),
+          h('div', { class: 'muted small' }, 'This is an estimate from your hardware. You can still try, but the PC may become very slow or the model may fail to load.'));
+        const go = await modal('This model may not load', body, [{ label: 'Cancel', value: false }, { label: 'Open the planner', value: 'plan' }, { label: 'Start anyway', value: true, danger: true }]);
+        if (go === true) return this.control(action, true);
+        if (go === 'plan') window.go('vgpu');
+        return;
+      }
+      fail(e);
+    }
+  },
+  async pullTelemetry() {
+    try {
+      const t = await api('vgpu/telemetry?n=2'), s = t.latest || {}, p = t.pressure || {}, box = clear(this.refs.live);
+      const gpu = (s.gpus || [])[0], proc = s.process || {};
+      box.append(h('span', { class: 'badge ' + ({ ok: 'good', elevated: 'slow', high: 'error', critical: 'error' }[p.level] || '') }, 'memory: ' + (p.level || '?')),
+        h('span', {}, 'RAM ', VU.fmt(s.ram && s.ram.used_pct, '%', 0)), h('span', {}, 'CPU ', VU.fmt(s.cpu && s.cpu.util_pct, '%', 0)),
+        gpu ? h('span', {}, 'GPU ', VU.fmt(gpu.util_pct, '%', 0), ' · VRAM ', VU.fmt(gpu.vram_used_mb, 'MB', 0)) : h('span', { class: 'unavail' }, 'GPU telemetry unavailable'),
+        proc.rss_gb && proc.rss_gb.value != null ? h('span', {}, 'model ', VU.fmt(proc.rss_gb, 'GB')) : null);
+    } catch (e) { clear(this.refs.live); }
   },
   async pullLogs() {
     try {
